@@ -4,7 +4,7 @@
     'category': 'Accounting/Accounting',
     'summary': 'Fetch Stripe invoices and credit notes into Odoo accounting',
     'author': 'Custom',
-    'depends': ['account', 'mail', 'sale_management'],
+    'depends': ['account', 'mail'],
     'data': [
         'security/security.xml',
         'security/ir.model.access.csv',
