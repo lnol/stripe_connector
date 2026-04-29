@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from odoo import _, api, fields, models
 from odoo.tools import html_escape
 
+from ..services.stripe_api import StripeApiService
+
 _logger = logging.getLogger(__name__)
 
 
@@ -73,6 +75,15 @@ class StripeAccount(models.Model):
         copy=False,
         help='Timestamp of the last fully successful Stripe fetch.',
     )
+    fetch_lookback_days = fields.Integer(
+        string='Fetch Lookback (days)',
+        default=90,
+        help=(
+            'On every fetch, also re-scan invoices created within this many days. '
+            'Catches subscription invoices that were created earlier but only finalized recently. '
+            'Already-imported invoices are skipped via deduplication.'
+        ),
+    )
     default_revenue_account_id = fields.Many2one(
         comodel_name='account.account',
         string='Default Revenue Account',
@@ -91,7 +102,6 @@ class StripeAccount(models.Model):
 
     def _get_stripe_service(self):
         self.ensure_one()
-        from ..services.stripe_api import StripeApiService
         return StripeApiService(self.api_key)
 
     def _create_import_run(self):
@@ -106,9 +116,29 @@ class StripeAccount(models.Model):
             run_id = self.env(cr=cr)['stripe.import.run'].create({
                 'stripe_account_id': self.id,
                 'state': 'running',
-                'message': 'Stripe fetch is running.',
+                'message': _('Stripe fetch is running.'),
             }).id
         return self.env['stripe.import.run'].browse(run_id)
+
+    def _reap_stale_running_runs(self):
+        """Fail any leftover ``running`` runs before starting a new fetch.
+
+        If a previous cron worker crashed mid-fetch the import-run record stays
+        ``running`` forever and the dashboard misleads the user into thinking
+        a fetch is still in progress. ir.cron serialises ``_cron_fetch_all``,
+        so there is no risk of clobbering a concurrent live run.
+        """
+        self.ensure_one()
+        stale = self.env['stripe.import.run'].search([
+            ('stripe_account_id', '=', self.id),
+            ('state', '=', 'running'),
+        ])
+        if stale:
+            stale.write({
+                'state': 'failed',
+                'finished_at': fields.Datetime.now(),
+                'message': _('Import run abandoned (a newer fetch superseded it).'),
+            })
 
     def _record_import_line(self, run, stripe_object, stripe_object_type, state, message, move=False):
         return self.env['stripe.import.run.line'].create({
@@ -259,11 +289,22 @@ class StripeAccount(models.Model):
             [('stripe_invoice_id', '=', stripe_id)], limit=1
         )
 
+    def _resolve_currency(self, currency_code):
+        if not currency_code:
+            return self.env['res.currency']
+        return self.env['res.currency'].with_context(active_test=False).search(
+            [('name', '=', currency_code.upper())], limit=1
+        )
+
     def _get_invoice_date(self, stripe_obj):
-        created_ts = stripe_obj.get('created')
-        if not created_ts:
+        # Prefer the finalization timestamp so accounting-period assignment matches
+        # the date the invoice was issued, not the date a draft was first created.
+        status_transitions = stripe_obj.get('status_transitions') or {}
+        finalized_ts = status_transitions.get('finalized_at')
+        ts = finalized_ts or stripe_obj.get('created')
+        if not ts:
             return False
-        return datetime.fromtimestamp(created_ts, tz=timezone.utc).date()
+        return datetime.fromtimestamp(ts, tz=timezone.utc).date()
 
     def _get_invoice_date_due(self, stripe_obj):
         due_ts = stripe_obj.get('due_date')
@@ -285,7 +326,7 @@ class StripeAccount(models.Model):
         customer_data = prefetched.get('customer_data') if prefetched else None
         partner = self._resolve_partner(stripe_customer_id, service=service, customer_data=customer_data)
         stripe_lines = prefetched['stripe_lines'] if prefetched else self._get_stripe_lines(stripe_obj, service, stripe_object_type)
-        return {
+        vals = {
             'move_type': move_type,
             'journal_id': self.sales_journal_id.id,
             'partner_id': partner.id,
@@ -295,9 +336,15 @@ class StripeAccount(models.Model):
             'stripe_object_type': stripe_object_type,
             'invoice_line_ids': self._build_move_lines(stripe_lines),
         }
+        currency = self._resolve_currency(stripe_obj.get('currency'))
+        if currency:
+            vals['currency_id'] = currency.id
+        return vals
 
     def _post_if_configured(self, move):
         if self.auto_confirm:
+            # ``disable_abnormal_invoice_detection`` skips Odoo's anomaly heuristic,
+            # which produces frequent false positives during bulk historical imports.
             move.with_context(disable_abnormal_invoice_detection=True).action_post()
 
     def _process_stripe_object(self, stripe_obj, service, move_type, stripe_object_type, prefetched=None):
@@ -307,12 +354,12 @@ class StripeAccount(models.Model):
 
         existing = self._get_existing_move(stripe_id)
         if existing:
-            return existing, 'skipped', 'Already imported.'
+            return existing, 'skipped', _('Already imported.')
 
         move_vals = self._prepare_move_vals(stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched)
         move = self.env['account.move'].create(move_vals)
         self._post_if_configured(move)
-        return move, 'done', 'Imported as %s.' % move.display_name
+        return move, 'done', _('Imported as %s.', move.display_name)
 
     def _process_stripe_invoice(self, stripe_invoice, service, move_type='out_invoice'):
         stripe_object_type = 'credit_note' if move_type == 'out_refund' else 'invoice'
@@ -321,13 +368,33 @@ class StripeAccount(models.Model):
         )
         return move
 
+    def _get_invoice_fetch_floor(self):
+        """Lower bound for `created` when listing invoices.
+
+        Late-finalized invoices (e.g. subscription drafts created weeks before
+        finalization) would be missed if we used ``last_fetch_at`` directly, so
+        we always re-scan a rolling lookback window. Already-imported invoices
+        are skipped by the SQL UNIQUE on ``account.move.stripe_invoice_id``.
+        """
+        self.ensure_one()
+        floor = False
+        if self.last_fetch_at:
+            lookback = self.fetch_lookback_days or 0
+            floor = self.last_fetch_at - timedelta(days=lookback) if lookback else self.last_fetch_at
+        cutoff = self.invoice_cutoff_date
+        if cutoff:
+            cutoff_dt = datetime.combine(cutoff, datetime.min.time())
+            if not floor or cutoff_dt > floor:
+                floor = cutoff_dt
+        return floor
+
     def _fetch_stripe_objects(self, service):
         return [
             (
                 'invoice',
                 'out_invoice',
                 service.get_invoices(
-                    created_after=self.last_fetch_at,
+                    created_after=self._get_invoice_fetch_floor(),
                     finalized_after=self.invoice_cutoff_date,
                 ),
             ),
@@ -392,13 +459,13 @@ class StripeAccount(models.Model):
         elif failures:
             state = 'failed'
 
-        summary = (
+        summary = _(
             'Imported %(done)s Stripe objects, skipped %(skipped)s, failed %(failed)s.'
-            % counts
-        )
+        ) % counts
         if failures:
-            summary = '%s\n\nFailures:\n%s' % (
+            summary = '%s\n\n%s\n%s' % (
                 summary,
+                _('Failures:'),
                 '\n'.join('- %s' % failure for failure in failures),
             )
 
@@ -431,8 +498,13 @@ class StripeAccount(models.Model):
 
     @api.model
     def _cron_fetch_all(self):
-        """Fetch invoices for every active Stripe account. Called by the cron."""
-        accounts = self.search([('active', '=', True)])
+        """Fetch invoices for every active Stripe account. Called by the cron.
+
+        Uses ``sudo()`` so the import-side creates (partner, product, move) do
+        not depend on the cron user being a Stripe admin — the access checks
+        on those models bail on ``env.su`` before consulting groups.
+        """
+        accounts = self.sudo().search([('active', '=', True)])
         _logger.info('Stripe cron: fetching for %d active account(s)', len(accounts))
         for account in accounts:
             try:
@@ -445,8 +517,9 @@ class StripeAccount(models.Model):
     def _fetch_invoices(self):
         self.ensure_one()
         fetch_started_at = fields.Datetime.now()
+        self._reap_stale_running_runs()
         run = self._create_import_run()
-        run.message_post(body='Stripe fetch started for %s.' % self.display_name)
+        run.message_post(body=_('Stripe fetch started for %s.', self.display_name))
         _logger.info('Stripe fetch started for account %s', self.display_name)
 
         counts = {

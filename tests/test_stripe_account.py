@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from odoo import fields
+from odoo import SUPERUSER_ID, fields
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
@@ -211,6 +211,63 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(move.state, 'posted')
         self.stripe_account.auto_confirm = False
 
+    def test_process_invoice_sets_currency_from_stripe(self):
+        usd = self.env.ref('base.USD')
+        service = MagicMock()
+        service.get_customer.return_value = {'name': 'FX Customer', 'email': '', 'phone': ''}
+        service.get_invoice_lines.return_value = [{
+            'amount': 5000,
+            'description': 'FX line',
+            'quantity': 1,
+            'pricing': {'price_details': {'product': 'prod_FX'}},
+        }]
+        service.get_pdf.return_value = b''
+
+        stripe_invoice = {
+            'id': 'in_FX001',
+            'customer': 'cus_FX',
+            'status': 'paid',
+            'created': 1700000000,
+            'currency': 'usd',
+            'invoice_pdf': None,
+        }
+        self.stripe_account._process_stripe_invoice(stripe_invoice, service, move_type='out_invoice')
+        move = self.env['account.move'].search([('stripe_invoice_id', '=', 'in_FX001')])
+        self.assertEqual(move.currency_id, usd)
+
+    def test_process_invoice_uses_finalized_at_for_invoice_date(self):
+        created_ts = int(datetime(2024, 1, 1, 0, 0, 0).timestamp())
+        finalized_ts = int(datetime(2024, 3, 15, 12, 0, 0).timestamp())
+        service = MagicMock()
+        service.get_customer.return_value = {'name': 'Late Finalize', 'email': '', 'phone': ''}
+        service.get_invoice_lines.return_value = [{
+            'amount': 1000,
+            'description': 'Late',
+            'quantity': 1,
+            'pricing': {'price_details': {'product': 'prod_LATE'}},
+        }]
+        service.get_pdf.return_value = b''
+
+        stripe_invoice = {
+            'id': 'in_LATEFIN001',
+            'customer': 'cus_LATE',
+            'status': 'paid',
+            'created': created_ts,
+            'status_transitions': {'finalized_at': finalized_ts},
+            'currency': 'eur',
+            'invoice_pdf': None,
+        }
+        self.stripe_account._process_stripe_invoice(stripe_invoice, service, move_type='out_invoice')
+        move = self.env['account.move'].search([('stripe_invoice_id', '=', 'in_LATEFIN001')])
+        self.assertEqual(
+            move.invoice_date,
+            datetime.fromtimestamp(finalized_ts, tz=timezone.utc).date(),
+        )
+
+    def test_get_invoice_date_falls_back_to_created(self):
+        result = self.stripe_account._get_invoice_date({'created': 1700000000})
+        self.assertEqual(result, datetime.fromtimestamp(1700000000, tz=timezone.utc).date())
+
     def test_process_credit_note_creates_out_refund(self):
         service = MagicMock()
         service.get_customer.return_value = {
@@ -335,6 +392,48 @@ class TestStripeAccount(TransactionCase):
             cutoff_date,
         )
 
+    def test_fetch_floor_applies_lookback(self):
+        self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
+        self.stripe_account.fetch_lookback_days = 30
+        floor = self.stripe_account._get_invoice_fetch_floor()
+        self.assertEqual(floor, fields.Datetime.to_datetime('2024-03-02 00:00:00'))
+
+    def test_fetch_floor_respects_invoice_cutoff(self):
+        self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
+        self.stripe_account.fetch_lookback_days = 30
+        self.stripe_account.invoice_cutoff_date = fields.Date.to_date('2024-06-01')
+        floor = self.stripe_account._get_invoice_fetch_floor()
+        self.assertEqual(floor, datetime(2024, 6, 1))
+
+    def test_fetch_floor_first_run_with_cutoff(self):
+        self.stripe_account.last_fetch_at = False
+        self.stripe_account.invoice_cutoff_date = fields.Date.to_date('2024-01-01')
+        floor = self.stripe_account._get_invoice_fetch_floor()
+        self.assertEqual(floor, datetime(2024, 1, 1))
+
+    def test_fetch_floor_first_run_no_cutoff(self):
+        self.stripe_account.last_fetch_at = False
+        self.stripe_account.invoice_cutoff_date = False
+        self.assertFalse(self.stripe_account._get_invoice_fetch_floor())
+
+    def test_fetch_invoices_uses_lookback_floor(self):
+        self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
+        self.stripe_account.fetch_lookback_days = 30
+        service = MagicMock()
+        service.get_invoices.return_value = []
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            self.stripe_account._fetch_invoices()
+
+        kwargs = service.get_invoices.call_args.kwargs
+        self.assertEqual(
+            kwargs.get('created_after'),
+            fields.Datetime.to_datetime('2024-03-02 00:00:00'),
+        )
+
     def test_fetch_invoices_does_not_advance_watermark_on_failure(self):
         previous_fetch_at = fields.Datetime.to_datetime('2024-01-01 12:00:00')
         self.stripe_account.last_fetch_at = previous_fetch_at
@@ -370,4 +469,85 @@ class TestStripeAccount(TransactionCase):
             run = self.stripe_account._fetch_invoices()
 
         self.assertEqual(run.state, 'done')
+        self.assertTrue(self.stripe_account.last_fetch_at)
+
+    def test_fetch_invoices_reaps_stale_running_runs(self):
+        stale = self.env['stripe.import.run'].create({
+            'stripe_account_id': self.stripe_account.id,
+            'state': 'running',
+            'message': 'Pretend this was abandoned by a previous worker.',
+        })
+        service = MagicMock()
+        service.get_invoices.return_value = []
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            self.stripe_account._fetch_invoices()
+
+        # The reaper commits via a separate cursor — invalidate to refetch.
+        stale.invalidate_recordset()
+        self.assertEqual(stale.state, 'failed')
+
+    # ── _cron_fetch_all ─────────────────────────────────────────────────
+
+    def test_cron_fetch_all_runs_as_root_via_sudo(self):
+        service = MagicMock()
+        service.get_customer.return_value = {'name': 'Cron Cust', 'email': '', 'phone': ''}
+        service.get_invoice_lines.return_value = [{
+            'amount': 1000,
+            'description': 'Cron line',
+            'quantity': 1,
+            'pricing': {'price_details': {'product': 'prod_CRON'}},
+        }]
+        service.get_pdf.return_value = b''
+        service.get_invoices.return_value = [{
+            'id': 'in_CRON_AS_ROOT',
+            'customer': 'cus_CRONROOT',
+            'status': 'paid',
+            'created': 1700000000,
+            'currency': 'eur',
+            'invoice_pdf': None,
+        }]
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            self.env['stripe.account'].with_user(SUPERUSER_ID)._cron_fetch_all()
+
+        move = self.env['account.move'].search([('stripe_invoice_id', '=', 'in_CRON_AS_ROOT')])
+        self.assertEqual(len(move), 1)
+
+    def test_cron_fetch_all_isolates_account_failures(self):
+        other_company = self.env['res.company'].create({'name': 'Cron Other'})
+        other_journal = self.env['account.journal'].create({
+            'name': 'Cron Other Sales',
+            'code': 'CRNOS',
+            'type': 'sale',
+            'company_id': other_company.id,
+        })
+        failing_account = self.env['stripe.account'].create({
+            'name': 'Cron Failing',
+            'api_key': 'sk_test_fail',
+            'company_id': other_company.id,
+            'sales_journal_id': other_journal.id,
+        })
+
+        good_service = MagicMock()
+        good_service.get_invoices.return_value = []
+        good_service.get_credit_notes.return_value = []
+
+        def get_service(self_account):
+            if self_account.id == failing_account.id:
+                raise RuntimeError('boom')
+            return good_service
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', autospec=True, side_effect=get_service
+        ):
+            self.env['stripe.account']._cron_fetch_all()
+
+        # Good account still ran to completion
         self.assertTrue(self.stripe_account.last_fetch_at)

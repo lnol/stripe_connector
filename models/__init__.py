@@ -1,3 +1,4 @@
+from . import stripe_linked_mixin
 from . import stripe_account
 from . import stripe_import_run
 from . import account_journal

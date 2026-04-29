@@ -17,12 +17,17 @@ class AccountJournal(models.Model):
 
     @api.depends('type', 'company_id')
     def _compute_stripe_account_id(self):
+        if not self:
+            return
+        accounts = self.env['stripe.account'].search([
+            ('sales_journal_id', 'in', self.ids),
+            ('active', '=', True),
+        ])
+        # ``stripe.account`` enforces ``_check_company_auto`` so the journal's
+        # company already matches the account's company — no second filter needed.
+        by_journal = {a.sales_journal_id.id: a for a in accounts}
         for journal in self:
-            journal.stripe_account_id = self.env['stripe.account'].search([
-                ('sales_journal_id', '=', journal.id),
-                ('active', '=', True),
-                ('company_id', '=', journal.company_id.id),
-            ], limit=1)
+            journal.stripe_account_id = by_journal.get(journal.id, False)
 
     @api.depends('stripe_account_id')
     def _compute_show_stripe_fetch_button(self):
