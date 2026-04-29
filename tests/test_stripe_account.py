@@ -1,7 +1,9 @@
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from odoo.tests.common import TransactionCase
+from odoo import fields
 from odoo.tests import tagged
+from odoo.tests.common import TransactionCase
 
 
 @tagged('post_install', '-at_install', 'stripe_connector')
@@ -120,7 +122,8 @@ class TestStripeAccount(TransactionCase):
     def test_process_invoice_skips_no_customer(self):
         service = MagicMock()
         stripe_invoice = {'id': 'in_NO_CUSTOMER', 'customer': None}
-        self.stripe_account._process_stripe_invoice(stripe_invoice, service)
+        with self.assertRaises(ValueError):
+            self.stripe_account._process_stripe_invoice(stripe_invoice, service)
         service.get_customer.assert_not_called()
         move_count = self.env['account.move'].search_count([
             ('stripe_invoice_id', '=', 'in_NO_CUSTOMER'),
@@ -162,6 +165,23 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(len(move.invoice_line_ids), 1)
         self.assertAlmostEqual(move.invoice_line_ids[0].price_unit, 50.0)
 
+    def test_get_line_price_unit_divides_total_amount_by_quantity(self):
+        line = {
+            'amount': 3000,
+            'quantity': 3,
+        }
+        self.assertAlmostEqual(self.stripe_account._get_line_price_unit(line), 10.0)
+
+    def test_get_line_price_unit_uses_unit_amount_when_present(self):
+        line = {
+            'amount': 3000,
+            'quantity': 3,
+            'pricing': {
+                'unit_amount_decimal': '1000',
+            },
+        }
+        self.assertAlmostEqual(self.stripe_account._get_line_price_unit(line), 10.0)
+
     def test_process_invoice_auto_confirm(self):
         self.stripe_account.auto_confirm = True
         service = MagicMock()
@@ -198,7 +218,7 @@ class TestStripeAccount(TransactionCase):
             'email': 'refund@example.com',
             'phone': '',
         }
-        service.get_invoice_lines.return_value = [{
+        service.get_credit_note_lines.return_value = [{
             'amount': 2000,
             'description': 'Refund',
             'quantity': 1,
@@ -217,6 +237,9 @@ class TestStripeAccount(TransactionCase):
         self.stripe_account._process_stripe_invoice(stripe_cn, service, move_type='out_refund')
         move = self.env['account.move'].search([('stripe_invoice_id', '=', 'cn_TESTCN001')])
         self.assertEqual(move.move_type, 'out_refund')
+        self.assertEqual(move.stripe_object_type, 'credit_note')
+        service.get_credit_note_lines.assert_called_once_with('cn_TESTCN001')
+        service.get_invoice_lines.assert_not_called()
 
     # ── PDF attachment ──────────────────────────────────────────────────
 
@@ -264,7 +287,7 @@ class TestStripeAccount(TransactionCase):
 
     # ── _fetch_invoices ─────────────────────────────────────────────────
 
-    def test_fetch_invoices_updates_last_fetch_date(self):
+    def test_fetch_invoices_updates_last_fetch_at(self):
         service = MagicMock()
         service.get_invoices.return_value = []
         service.get_credit_notes.return_value = []
@@ -274,11 +297,10 @@ class TestStripeAccount(TransactionCase):
         ):
             self.stripe_account._fetch_invoices()
 
-        self.assertIsNotNone(self.stripe_account.last_fetch_date)
+        self.assertIsNotNone(self.stripe_account.last_fetch_at)
 
-    def test_fetch_invoices_passes_last_fetch_date(self):
-        from odoo import fields
-        self.stripe_account.last_fetch_date = fields.Date.from_string('2024-01-01')
+    def test_fetch_invoices_passes_last_fetch_at(self):
+        self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-01-01 12:00:00')
         service = MagicMock()
         service.get_invoices.return_value = []
         service.get_credit_notes.return_value = []
@@ -294,3 +316,40 @@ class TestStripeAccount(TransactionCase):
         if created_after is None and call_args:
             created_after = call_args[0]
         self.assertIsNotNone(created_after)
+
+    def test_fetch_invoices_does_not_advance_watermark_on_failure(self):
+        previous_fetch_at = fields.Datetime.to_datetime('2024-01-01 12:00:00')
+        self.stripe_account.last_fetch_at = previous_fetch_at
+        service = MagicMock()
+        service.get_invoices.return_value = [{
+            'id': 'in_FAILING_WATERMARK',
+            'customer': None,
+            'created': int(datetime(2024, 1, 2).timestamp()),
+        }]
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            run = self.stripe_account._fetch_invoices()
+
+        self.assertEqual(run.state, 'failed')
+        self.assertEqual(self.stripe_account.last_fetch_at, previous_fetch_at)
+        failed_line = run.line_ids.filtered(
+            lambda line: line.stripe_object_id == 'in_FAILING_WATERMARK'
+        )
+        self.assertEqual(failed_line.state, 'failed')
+
+    def test_fetch_invoices_advances_watermark_on_success(self):
+        self.stripe_account.last_fetch_at = False
+        service = MagicMock()
+        service.get_invoices.return_value = []
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            run = self.stripe_account._fetch_invoices()
+
+        self.assertEqual(run.state, 'done')
+        self.assertTrue(self.stripe_account.last_fetch_at)

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="stripe_import_run_view_list" model="ir.ui.view">
+        <field name="name">stripe.import.run.list</field>
+        <field name="model">stripe.import.run</field>
+        <field name="arch" type="xml">
+            <list string="Stripe Import Runs" create="0" edit="0">
+                <field name="started_at"/>
+                <field name="stripe_account_id"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'done'"
+                       decoration-warning="state == 'partial'"
+                       decoration-danger="state == 'failed'"
+                       decoration-info="state == 'running'"/>
+                <field name="invoice_count"/>
+                <field name="credit_note_count"/>
+                <field name="skipped_count"/>
+                <field name="error_count"/>
+                <field name="finished_at"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="stripe_import_run_view_form" model="ir.ui.view">
+        <field name="name">stripe.import.run.form</field>
+        <field name="model">stripe.import.run</field>
+        <field name="arch" type="xml">
+            <form string="Stripe Import Run" create="0" edit="0">
+                <header>
+                    <field name="state" widget="statusbar" statusbar_visible="running,done,partial,failed"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" readonly="1"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="stripe_account_id" readonly="1"/>
+                            <field name="company_id" readonly="1" groups="base.group_multi_company"/>
+                            <field name="started_at" readonly="1"/>
+                            <field name="finished_at" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="invoice_count" readonly="1"/>
+                            <field name="credit_note_count" readonly="1"/>
+                            <field name="skipped_count" readonly="1"/>
+                            <field name="error_count" readonly="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Summary" name="summary">
+                            <field name="message" nolabel="1" readonly="1"/>
+                        </page>
+                        <page string="Lines" name="lines">
+                            <field name="line_ids" readonly="1">
+                                <list string="Import Lines" create="0" edit="0">
+                                    <field name="stripe_object_type"/>
+                                    <field name="stripe_object_id"/>
+                                    <field name="state" widget="badge"
+                                           decoration-success="state == 'done'"
+                                           decoration-warning="state == 'skipped'"
+                                           decoration-danger="state == 'failed'"/>
+                                    <field name="move_id"/>
+                                    <field name="message"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="stripe_import_run_view_search" model="ir.ui.view">
+        <field name="name">stripe.import.run.search</field>
+        <field name="model">stripe.import.run</field>
+        <field name="arch" type="xml">
+            <search string="Stripe Import Runs">
+                <field name="stripe_account_id"/>
+                <field name="state"/>
+                <filter string="Failed" name="failed" domain="[('state', 'in', ('failed', 'partial'))]"/>
+                <group>
+                    <filter string="Stripe Account" name="group_stripe_account"
+                            context="{'group_by': 'stripe_account_id'}"/>
+                    <filter string="Status" name="group_state"
+                            context="{'group_by': 'state'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="stripe_import_run_action" model="ir.actions.act_window">
+        <field name="name">Stripe Import Runs</field>
+        <field name="res_model">stripe.import.run</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="stripe_import_run_view_search"/>
+        <field name="context">{}</field>
+    </record>
+
+    <menuitem
+        id="menu_stripe_import_run"
+        name="Stripe Import Runs"
+        parent="account.account_account_menu"
+        action="stripe_import_run_action"
+        sequence="51"
+        groups="stripe_connector.group_stripe_admin"
+    />
+</odoo>

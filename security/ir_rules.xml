@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="stripe_account_company_rule" model="ir.rule">
+        <field name="name">Stripe Account: company access</field>
+        <field name="model_id" ref="model_stripe_account"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="stripe_import_run_company_rule" model="ir.rule">
+        <field name="name">Stripe Import Run: company access</field>
+        <field name="model_id" ref="model_stripe_import_run"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="stripe_import_run_line_company_rule" model="ir.rule">
+        <field name="name">Stripe Import Run Line: company access</field>
+        <field name="model_id" ref="model_stripe_import_run_line"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>

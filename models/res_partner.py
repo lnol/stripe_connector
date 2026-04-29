@@ -8,4 +8,5 @@ class ResPartner(models.Model):
         string='Stripe Customer ID',
         index=True,
         copy=False,
+        help='Stripe customer identifier linked to this contact.',
     )

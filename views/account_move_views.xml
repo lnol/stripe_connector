@@ -9,6 +9,9 @@
                 <field name="stripe_invoice_id"
                        readonly="1"
                        invisible="not stripe_invoice_id"/>
+                <field name="stripe_object_type"
+                       readonly="1"
+                       invisible="not stripe_object_type"/>
             </xpath>
         </field>
     </record>

@@ -8,4 +8,5 @@ class ProductTemplate(models.Model):
         string='Stripe Product ID',
         index=True,
         copy=False,
+        help='Stripe product identifier linked to this product.',
     )

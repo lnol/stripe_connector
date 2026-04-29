@@ -15,7 +15,7 @@
                 <t t-if="journal_type == 'sale' and record.show_stripe_fetch_button.raw_value">
                     <button type="object" name="action_stripe_fetch_invoices"
                             class="btn btn-secondary ms-1"
-                            groups="stripe_connector.group_stripe_user">
+                            groups="stripe_connector.group_stripe_admin">
                         Fetch Stripe Invoices
                     </button>
                 </t>

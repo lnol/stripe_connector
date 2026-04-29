@@ -1,4 +1,5 @@
-from odoo import api, fields, models
+from odoo import _, api, fields, models
+from odoo.exceptions import AccessError
 
 
 class AccountJournal(models.Model):
@@ -30,6 +31,19 @@ class AccountJournal(models.Model):
 
     def action_stripe_fetch_invoices(self):
         self.ensure_one()
+        if not self.env.user.has_group('stripe_connector.group_stripe_admin'):
+            raise AccessError(_('Only Stripe administrators can fetch Stripe invoices.'))
         if not self.stripe_account_id:
             return
-        self.stripe_account_id._fetch_invoices()
+        run = self.stripe_account_id._fetch_invoices()
+        notification_type = 'success' if run.state == 'done' else 'warning'
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Stripe Fetch Complete'),
+                'message': run.message,
+                'type': notification_type,
+                'sticky': run.state != 'done',
+            },
+        }

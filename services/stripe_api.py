@@ -1,6 +1,8 @@
+from datetime import date, datetime, time, timezone
+
 import requests
 
-from ..const import STRIPE_API_BASE_URL
+from ..const import STRIPE_API_BASE_URL, STRIPE_REQUEST_TIMEOUT
 
 
 class StripeApiService:
@@ -12,7 +14,11 @@ class StripeApiService:
 
     def _get(self, endpoint, params=None):
         url = STRIPE_API_BASE_URL + endpoint
-        response = self.session.get(url, params=params or {})
+        response = self.session.get(
+            url,
+            params=params or {},
+            timeout=STRIPE_REQUEST_TIMEOUT,
+        )
         response.raise_for_status()
         return response.json()
 
@@ -22,36 +28,39 @@ class StripeApiService:
         params['limit'] = 100
         while True:
             data = self._get(endpoint, params)
-            items.extend(data.get('data', []))
+            page_items = data.get('data', [])
+            items.extend(page_items)
             if not data.get('has_more'):
                 break
-            params['starting_after'] = data['data'][-1]['id']
+            if not page_items:
+                break
+            params['starting_after'] = page_items[-1]['id']
         return items
 
+    def _to_stripe_timestamp(self, created_after):
+        if not created_after:
+            return False
+        if isinstance(created_after, datetime):
+            value = created_after
+        elif isinstance(created_after, date):
+            value = datetime.combine(created_after, time.min)
+        else:
+            value = datetime.fromisoformat(str(created_after))
+        if not value.tzinfo:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+
+    def _created_params(self, created_after):
+        timestamp = self._to_stripe_timestamp(created_after)
+        return {'created[gt]': timestamp} if timestamp else {}
+
     def get_invoices(self, created_after=None):
-        params = {}
-        if created_after:
-            from datetime import datetime, timezone
-            ts = int(datetime.combine(
-                created_after,
-                datetime.min.time(),
-                tzinfo=timezone.utc,
-            ).timestamp())
-            params['created[gt]'] = ts
-        all_invoices = self._paginate('invoices', params)
+        all_invoices = self._paginate('invoices', self._created_params(created_after))
         return [inv for inv in all_invoices if inv.get('status') != 'draft']
 
     def get_credit_notes(self, created_after=None):
-        params = {'status': 'issued'}
-        if created_after:
-            from datetime import datetime, timezone
-            ts = int(datetime.combine(
-                created_after,
-                datetime.min.time(),
-                tzinfo=timezone.utc,
-            ).timestamp())
-            params['created[gt]'] = ts
-        return self._paginate('credit_notes', params)
+        credit_notes = self._paginate('credit_notes', self._created_params(created_after))
+        return [credit_note for credit_note in credit_notes if credit_note.get('status') == 'issued']
 
     def get_customer(self, customer_id):
         return self._get('customers/%s' % customer_id)
@@ -59,7 +68,10 @@ class StripeApiService:
     def get_invoice_lines(self, invoice_id):
         return self._paginate('invoices/%s/lines' % invoice_id, {})
 
+    def get_credit_note_lines(self, credit_note_id):
+        return self._paginate('credit_notes/%s/lines' % credit_note_id, {})
+
     def get_pdf(self, pdf_url):
-        response = self.session.get(pdf_url)
+        response = self.session.get(pdf_url, timeout=STRIPE_REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.content

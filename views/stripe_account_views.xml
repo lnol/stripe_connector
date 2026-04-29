@@ -17,7 +17,7 @@
                         </group>
                         <group>
                             <field name="auto_confirm"/>
-                            <field name="last_fetch_date" readonly="1"/>
+                            <field name="last_fetch_at" readonly="1"/>
                         </group>
                     </group>
                     <notebook>
@@ -38,6 +38,23 @@
                                        groups="account.group_account_readonly"/>
                             </group>
                         </page>
+                        <page string="Import Runs" name="import_runs">
+                            <field name="import_run_ids" readonly="1">
+                                <list string="Import Runs" create="0" edit="0">
+                                    <field name="started_at"/>
+                                    <field name="state" widget="badge"
+                                           decoration-success="state == 'done'"
+                                           decoration-warning="state == 'partial'"
+                                           decoration-danger="state == 'failed'"
+                                           decoration-info="state == 'running'"/>
+                                    <field name="invoice_count"/>
+                                    <field name="credit_note_count"/>
+                                    <field name="skipped_count"/>
+                                    <field name="error_count"/>
+                                    <field name="finished_at"/>
+                                </list>
+                            </field>
+                        </page>
                     </notebook>
                 </sheet>
             </form>
@@ -54,7 +71,7 @@
                 <field name="company_id" groups="base.group_multi_company"/>
                 <field name="sales_journal_id"/>
                 <field name="auto_confirm"/>
-                <field name="last_fetch_date"/>
+                <field name="last_fetch_at"/>
                 <field name="active" column_invisible="True"/>
             </list>
         </field>
