@@ -105,20 +105,48 @@ class StripeAccount(models.Model):
             'message': message,
         })
 
-    def _resolve_partner(self, stripe_customer_id, service):
+    def _prefetch_stripe_data(self, stripe_obj, service, stripe_object_type):
+        """Fetch all remote Stripe data before entering any DB savepoint.
+
+        Stripe API calls (HTTP) inside a gevent savepoint can trigger a
+        greenlet switch that closes the DB cursor, corrupting the transaction.
+        Pre-fetching here keeps the savepoint free of network I/O.
+        """
+        result = {}
+        stripe_customer_id = stripe_obj.get('customer')
+        if stripe_customer_id:
+            existing_partner = self.env['res.partner'].search(
+                [('stripe_customer_id', '=', stripe_customer_id)], limit=1
+            )
+            if not existing_partner:
+                result['customer_data'] = service.get_customer(stripe_customer_id)
+        result['stripe_lines'] = self._get_stripe_lines(stripe_obj, service, stripe_object_type)
+        pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
+        pdf_url = stripe_obj.get(pdf_field)
+        if pdf_url:
+            try:
+                result['pdf_bytes'] = service.get_pdf(pdf_url)
+                result['pdf_field'] = pdf_field
+            except Exception:
+                _logger.exception('Could not prefetch Stripe PDF for %s', stripe_obj.get('id'))
+        return result
+
+    def _resolve_partner(self, stripe_customer_id, service=None, customer_data=None):
         partner = self.env['res.partner'].search(
             [('stripe_customer_id', '=', stripe_customer_id)], limit=1
         )
         if not partner:
-            customer_data = service.get_customer(stripe_customer_id)
+            if customer_data is None and service is not None:
+                customer_data = service.get_customer(stripe_customer_id)
+            data = customer_data or {}
             partner = self.env['res.partner'].create({
                 'name': (
-                    customer_data.get('name')
-                    or customer_data.get('email')
+                    data.get('name')
+                    or data.get('email')
                     or stripe_customer_id
                 ),
-                'email': customer_data.get('email') or '',
-                'phone': customer_data.get('phone') or '',
+                'email': data.get('email') or '',
+                'phone': data.get('phone') or '',
                 'stripe_customer_id': stripe_customer_id,
                 'customer_rank': 1,
             })
@@ -188,12 +216,17 @@ class StripeAccount(models.Model):
     def _build_move_lines(self, stripe_lines):
         return [(0, 0, self._prepare_move_line_vals(line)) for line in stripe_lines]
 
-    def _attach_pdf(self, move, stripe_obj, service, pdf_field='invoice_pdf'):
-        pdf_url = stripe_obj.get(pdf_field)
-        if not pdf_url:
-            return
+    def _attach_pdf(self, move, stripe_obj, service=None, pdf_field='invoice_pdf', pdf_bytes=None):
+        if pdf_bytes is None:
+            pdf_url = stripe_obj.get(pdf_field)
+            if not pdf_url or service is None:
+                return
+            try:
+                pdf_bytes = service.get_pdf(pdf_url)
+            except Exception:
+                _logger.exception('Could not fetch Stripe PDF for %s', stripe_obj.get('id'))
+                return
         try:
-            pdf_bytes = service.get_pdf(pdf_url)
             self.env['ir.attachment'].create({
                 'name': 'stripe_%s_%s.pdf' % (pdf_field.replace('_pdf', ''), stripe_obj['id']),
                 'datas': base64.b64encode(pdf_bytes),
@@ -227,13 +260,14 @@ class StripeAccount(models.Model):
             return service.get_credit_note_lines(stripe_id)
         return service.get_invoice_lines(stripe_id)
 
-    def _prepare_move_vals(self, stripe_obj, service, move_type, stripe_object_type):
+    def _prepare_move_vals(self, stripe_obj, service, move_type, stripe_object_type, prefetched=None):
         stripe_customer_id = stripe_obj.get('customer')
         if not stripe_customer_id:
             raise ValueError('Stripe object has no customer.')
 
-        partner = self._resolve_partner(stripe_customer_id, service)
-        stripe_lines = self._get_stripe_lines(stripe_obj, service, stripe_object_type)
+        customer_data = prefetched.get('customer_data') if prefetched else None
+        partner = self._resolve_partner(stripe_customer_id, service=service, customer_data=customer_data)
+        stripe_lines = prefetched['stripe_lines'] if prefetched else self._get_stripe_lines(stripe_obj, service, stripe_object_type)
         return {
             'move_type': move_type,
             'journal_id': self.sales_journal_id.id,
@@ -249,7 +283,7 @@ class StripeAccount(models.Model):
         if self.auto_confirm:
             move.with_context(disable_abnormal_invoice_detection=True).action_post()
 
-    def _process_stripe_object(self, stripe_obj, service, move_type, stripe_object_type):
+    def _process_stripe_object(self, stripe_obj, service, move_type, stripe_object_type, prefetched=None):
         stripe_id = stripe_obj.get('id')
         if not stripe_id:
             raise ValueError('Stripe object has no ID.')
@@ -258,11 +292,8 @@ class StripeAccount(models.Model):
         if existing:
             return existing, 'skipped', 'Already imported.'
 
-        move_vals = self._prepare_move_vals(stripe_obj, service, move_type, stripe_object_type)
+        move_vals = self._prepare_move_vals(stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched)
         move = self.env['account.move'].create(move_vals)
-
-        pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
-        self._attach_pdf(move, stripe_obj, service, pdf_field=pdf_field)
         self._post_if_configured(move)
         return move, 'done', 'Imported as %s.' % move.display_name
 
@@ -281,11 +312,31 @@ class StripeAccount(models.Model):
 
     def _process_batch_item(self, run, stripe_obj, service, move_type, stripe_object_type):
         stripe_id = stripe_obj.get('id')
+        # Pre-fetch all Stripe API data before entering the DB savepoint.
+        # HTTP calls inside a savepoint can trigger gevent greenlet switches
+        # that close the cursor, breaking both the rollback and any follow-up
+        # DB writes (e.g. recording the failure itself).
+        try:
+            prefetched = self._prefetch_stripe_data(stripe_obj, service, stripe_object_type)
+        except Exception as error:
+            message = '%s: %s' % (error.__class__.__name__, error)
+            _logger.exception('Error prefetching Stripe data for %s %s', stripe_object_type, stripe_id)
+            self._record_import_line(run, stripe_obj, stripe_object_type, 'failed', message)
+            return 'failed', message
+
         try:
             with self.env.cr.savepoint():
                 move, state, message = self._process_stripe_object(
-                    stripe_obj, service, move_type, stripe_object_type
+                    stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched
                 )
+            # PDF attachment happens outside the savepoint so that the HTTP call to
+            # download the PDF cannot trigger a gevent greenlet switch while a DB
+            # savepoint is active, which would corrupt the cursor for all subsequent
+            # operations in this request.
+            if state == 'done':
+                pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
+                pdf_bytes = prefetched.get('pdf_bytes') if prefetched else None
+                self._attach_pdf(move, stripe_obj, service=service, pdf_field=pdf_field, pdf_bytes=pdf_bytes)
             self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
             return state, False
         except Exception as error:
