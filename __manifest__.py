@@ -7,6 +7,7 @@
     'depends': ['account', 'mail'],
     'data': [
         'security/security.xml',
+        'data/ir_cron.xml',
         'security/ir.model.access.csv',
         'security/ir_rules.xml',
         'views/stripe_account_views.xml',

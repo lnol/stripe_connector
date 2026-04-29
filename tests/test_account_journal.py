@@ -51,3 +51,19 @@ class TestAccountJournal(TransactionCase):
 
         self.assertIn('stripe_invoice_id', self.env['account.move']._fields)
         self.assertIn('stripe_product_id', self.env['product.template']._fields)
+
+    def test_open_stripe_product_action(self):
+        product = self.env['product.template'].create({
+            'name': 'Stripe Product',
+            'stripe_product_id': 'prod_TEST123',
+            'type': 'service',
+        })
+
+        action = product.action_open_stripe_product()
+
+        self.assertEqual(action['type'], 'ir.actions.act_url')
+        self.assertEqual(
+            action['url'],
+            'https://dashboard.stripe.com/products/prod_TEST123',
+        )
+        self.assertEqual(action['target'], 'new')

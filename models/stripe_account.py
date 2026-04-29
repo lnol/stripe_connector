@@ -1,8 +1,8 @@
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from odoo import fields, models
+from odoo import _, api, fields, models
 from odoo.tools import html_escape
 
 _logger = logging.getLogger(__name__)
@@ -88,12 +88,20 @@ class StripeAccount(models.Model):
         return StripeApiService(self.api_key)
 
     def _create_import_run(self):
+        """Create the import run in a separate cursor so it commits immediately.
+
+        The cron transaction is long-lived; without this, the record would be
+        invisible to other DB connections (e.g. the UI) until the entire fetch
+        completes.
+        """
         self.ensure_one()
-        return self.env['stripe.import.run'].create({
-            'stripe_account_id': self.id,
-            'state': 'running',
-            'message': 'Stripe fetch is running.',
-        })
+        with self.env.registry.cursor() as cr:
+            run_id = self.env(cr=cr)['stripe.import.run'].create({
+                'stripe_account_id': self.id,
+                'state': 'running',
+                'message': 'Stripe fetch is running.',
+            }).id
+        return self.env['stripe.import.run'].browse(run_id)
 
     def _record_import_line(self, run, stripe_object, stripe_object_type, state, message, move=False):
         return self.env['stripe.import.run.line'].create({
@@ -127,8 +135,10 @@ class StripeAccount(models.Model):
             try:
                 result['pdf_bytes'] = service.get_pdf(pdf_url)
                 result['pdf_field'] = pdf_field
-            except Exception:
-                _logger.exception('Could not prefetch Stripe PDF for %s', stripe_obj.get('id'))
+            except Exception as exc:
+                _logger.warning(
+                    'Could not prefetch Stripe PDF for %s: %s', stripe_obj.get('id'), exc
+                )
         return result
 
     def _resolve_partner(self, stripe_customer_id, service=None, customer_data=None):
@@ -223,8 +233,8 @@ class StripeAccount(models.Model):
                 return
             try:
                 pdf_bytes = service.get_pdf(pdf_url)
-            except Exception:
-                _logger.exception('Could not fetch Stripe PDF for %s', stripe_obj.get('id'))
+            except Exception as exc:
+                _logger.warning('Could not fetch Stripe PDF for %s: %s', stripe_obj.get('id'), exc)
                 return
         try:
             self.env['ir.attachment'].create({
@@ -336,13 +346,28 @@ class StripeAccount(models.Model):
             if state == 'done':
                 pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
                 pdf_bytes = prefetched.get('pdf_bytes') if prefetched else None
-                self._attach_pdf(move, stripe_obj, service=service, pdf_field=pdf_field, pdf_bytes=pdf_bytes)
+                # If prefetch already attempted the download (pdf_url exists but
+                # pdf_bytes is absent), the error was already logged — don't retry
+                # with the same URL.
+                pdf_url = stripe_obj.get(pdf_field)
+                already_attempted = prefetched is not None and pdf_url and 'pdf_bytes' not in prefetched
+                self._attach_pdf(
+                    move, stripe_obj,
+                    service=None if already_attempted else service,
+                    pdf_field=pdf_field,
+                    pdf_bytes=pdf_bytes,
+                )
             self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
             return state, False
         except Exception as error:
             message = '%s: %s' % (error.__class__.__name__, error)
             _logger.exception('Error processing Stripe %s %s', stripe_object_type, stripe_id)
-            self._record_import_line(run, stripe_obj, stripe_object_type, 'failed', message)
+            try:
+                self._record_import_line(run, stripe_obj, stripe_object_type, 'failed', message)
+            except Exception:
+                _logger.exception(
+                    'Could not record failure line for Stripe %s %s', stripe_object_type, stripe_id
+                )
             return 'failed', message
 
     def _finish_import_run(self, run, counts, failures):
@@ -374,6 +399,34 @@ class StripeAccount(models.Model):
         })
         run.message_post(body='<br/>'.join(html_escape(line) for line in summary.splitlines()))
         return state
+
+    def _trigger_fetch(self):
+        """Trigger the shared Stripe fetch cron to run in the background.
+
+        Uses a pre-defined single cron record instead of creating a new one per
+        click, following the same pattern as account_online_synchronization.
+        The trigger fires within the cron worker's next poll cycle (~60 s).
+        """
+        self.ensure_one()
+        cron = self.env.ref('stripe_connector.cron_stripe_fetch_invoices', raise_if_not_found=False)
+        if not cron:
+            _logger.error('Stripe fetch cron not found (stripe_connector.cron_stripe_fetch_invoices)')
+            return
+        _logger.info('Stripe fetch: triggering cron id=%d active=%s', cron.id, cron.active)
+        cron.sudo()._trigger(fields.Datetime.now() + timedelta(seconds=1))
+
+    @api.model
+    def _cron_fetch_all(self):
+        """Fetch invoices for every active Stripe account. Called by the cron."""
+        accounts = self.search([('active', '=', True)])
+        _logger.info('Stripe cron: fetching for %d active account(s)', len(accounts))
+        for account in accounts:
+            try:
+                account._fetch_invoices()
+            except Exception:
+                _logger.exception(
+                    'Unhandled error during Stripe invoice fetch for account %s', account.name
+                )
 
     def _fetch_invoices(self):
         self.ensure_one()

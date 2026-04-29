@@ -35,15 +35,16 @@ class AccountJournal(models.Model):
             raise AccessError(_('Only Stripe administrators can fetch Stripe invoices.'))
         if not self.stripe_account_id:
             return
-        run = self.stripe_account_id._fetch_invoices()
-        notification_type = 'success' if run.state == 'done' else 'warning'
+        self.stripe_account_id._trigger_fetch()
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Stripe Fetch Complete'),
-                'message': run.message,
-                'type': notification_type,
-                'sticky': run.state != 'done',
+                'title': _('Stripe Fetch Started'),
+                'message': _(
+                    'Invoices are being imported in the background. '
+                    'Check the import history on the Stripe account for results.'
+                ),
+                'type': 'info',
             },
         }
