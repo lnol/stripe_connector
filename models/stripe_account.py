@@ -105,20 +105,27 @@ class StripeAccount(models.Model):
         return StripeApiService(self.api_key)
 
     def _create_import_run(self):
-        """Create the import run in a separate cursor so it commits immediately.
+        """Create the import run on the current cursor.
 
-        The cron transaction is long-lived; without this, the record would be
-        invisible to other DB connections (e.g. the UI) until the entire fetch
-        completes.
+        We deliberately do NOT use ``self.env.registry.cursor()`` to commit the
+        run early for mid-fetch UI visibility: Odoo runs cursors at REPEATABLE
+        READ isolation, so the main cursor's snapshot is taken at its first
+        ``SELECT`` and excludes any commits made afterwards by another cursor.
+        Subsequent reads on the run from the main cursor (notably the ones
+        ``mail.thread.message_post`` performs) would then raise ``MissingError``
+        even though the row is in the database.
+
+        The trade-off is that other connections (e.g. a browser viewing the
+        Stripe Account form) only see the run after the cron transaction
+        commits at end-of-job; for a typical daily fetch that is a matter of
+        seconds, which is acceptable.
         """
         self.ensure_one()
-        with self.env.registry.cursor() as cr:
-            run_id = self.env(cr=cr)['stripe.import.run'].create({
-                'stripe_account_id': self.id,
-                'state': 'running',
-                'message': _('Stripe fetch is running.'),
-            }).id
-        return self.env['stripe.import.run'].browse(run_id)
+        return self.env['stripe.import.run'].create({
+            'stripe_account_id': self.id,
+            'state': 'running',
+            'message': _('Stripe fetch is running.'),
+        })
 
     def _reap_stale_running_runs(self):
         """Fail any leftover ``running`` runs before starting a new fetch.
