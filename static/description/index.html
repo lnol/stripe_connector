@@ -1,0 +1,61 @@
+<section class="oe_container">
+    <div class="oe_row oe_spaced">
+        <h2 class="oe_slogan">Stripe Connector</h2>
+        <h3 class="oe_slogan">Pull Stripe invoices and credit notes into Odoo Accounting.</h3>
+    </div>
+</section>
+
+<section class="oe_container oe_dark">
+    <div class="oe_row">
+        <div class="oe_span6">
+            <h3 class="oe_slogan">What you get</h3>
+            <ul>
+                <li>Daily cron syncs finalized Stripe invoices and issued credit notes into <code>account.move</code>.</li>
+                <li>Stripe customers and products are resolved &mdash; or created &mdash; on the fly.</li>
+                <li>Each move keeps the Stripe currency and the Stripe-rendered PDF as an attachment.</li>
+                <li>One <em>Stripe Account</em> per company, isolated by record rule.</li>
+                <li>Per-run history with pass / skip / fail counts and a chatter audit trail.</li>
+                <li>One-click <em>Fetch Stripe Invoices</em> button on the sales journal dashboard.</li>
+            </ul>
+        </div>
+        <div class="oe_span6">
+            <h3 class="oe_slogan">What you keep doing manually</h3>
+            <ul>
+                <li><strong>Tax lines.</strong> Imported invoices land in <em>draft</em>. A human edits each move and adds tax so the Odoo total matches the Stripe total before posting.</li>
+                <li><strong>Payment reconciliation.</strong> This module imports the invoice; matching it to a bank movement is left to your existing reconciliation workflow.</li>
+            </ul>
+            <p><em>Auto-Confirm Invoices</em> bypasses the manual review step and is intended for tax-free Stripe accounts only.</p>
+        </div>
+    </div>
+</section>
+
+<section class="oe_container">
+    <div class="oe_row oe_spaced">
+        <h3 class="oe_slogan">How the import stays correct</h3>
+        <ul>
+            <li><strong>Deduplication.</strong> A SQL <code>UNIQUE</code> on <code>stripe_invoice_id</code> guarantees one Odoo move per Stripe object even under concurrent retries.</li>
+            <li><strong>Late-finalized invoices.</strong> A configurable rolling <em>Fetch Lookback</em> (default 90 days) re-scans recent invoices on every cron tick, so subscription invoices created weeks before they finalize are never missed.</li>
+            <li><strong>Watermark safety.</strong> The per-account &ldquo;last successful fetch&rdquo; only advances on a clean run &mdash; partial or failed runs are retried next cycle.</li>
+            <li><strong>Crash recovery.</strong> A leftover <em>running</em> import-run from a worker that died mid-fetch is auto-failed at the start of the next fetch.</li>
+        </ul>
+    </div>
+</section>
+
+<section class="oe_container oe_dark">
+    <div class="oe_row oe_spaced">
+        <h3 class="oe_slogan">Security</h3>
+        <ul>
+            <li><strong>Stripe Administrator</strong> (implied by <em>Accounting Manager</em>): manages Stripe Accounts, reads the API key, and is the only group that can write Stripe-ID fields on partners, products, and moves.</li>
+            <li><strong>Stripe User</strong> (implied by <em>Accounting User</em>): read-only on Stripe Accounts and Import Runs.</li>
+            <li>The API key is field-level restricted &mdash; non-admins cannot read it back.</li>
+            <li>Record rules confine each Stripe Account and its runs to its company.</li>
+        </ul>
+    </div>
+</section>
+
+<section class="oe_container">
+    <div class="oe_row oe_spaced">
+        <h3 class="oe_slogan">Requirements</h3>
+        <p>Odoo 19.0 with the <code>account</code> module. Community is sufficient. A Stripe secret API key with read access to invoices, credit notes, customers, and PDFs.</p>
+    </div>
+</section>
