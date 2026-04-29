@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record model="res.groups.privilege" id="res_groups_privilege_stripe">
+        <field name="name">Stripe Connector</field>
+        <field name="category_id" ref="base.module_category_accounting"/>
+        <field name="sequence">99</field>
+    </record>
+
+    <record id="group_stripe_user" model="res.groups">
+        <field name="name">User</field>
+        <field name="privilege_id" ref="res_groups_privilege_stripe"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+    </record>
+
+    <record id="group_stripe_admin" model="res.groups">
+        <field name="name">Administrator</field>
+        <field name="privilege_id" ref="res_groups_privilege_stripe"/>
+        <field name="implied_ids" eval="[(4, ref('stripe_connector.group_stripe_user'))]"/>
+    </record>
+
+    <!-- Accounting Manager gets Stripe Admin -->
+    <record id="account.group_account_manager" model="res.groups">
+        <field name="implied_ids" eval="[(4, ref('stripe_connector.group_stripe_admin'))]"/>
+    </record>
+
+    <!-- Accounting User gets Stripe User -->
+    <record id="account.group_account_user" model="res.groups">
+        <field name="implied_ids" eval="[(4, ref('stripe_connector.group_stripe_user'))]"/>
+    </record>
+</odoo>

@@ -1,0 +1,21 @@
+{
+    'name': 'Stripe Connector',
+    'version': '19.0.1.0.0',
+    'category': 'Accounting/Accounting',
+    'summary': 'Fetch Stripe invoices and credit notes into Odoo accounting',
+    'author': 'Custom',
+    'depends': ['account', 'sale_management'],
+    'data': [
+        'security/security.xml',
+        'security/ir.model.access.csv',
+        'views/stripe_account_views.xml',
+        'views/account_journal_dashboard_views.xml',
+        'views/account_move_views.xml',
+        'views/res_partner_views.xml',
+        'views/product_template_views.xml',
+        'views/res_config_settings_views.xml',
+    ],
+    'installable': True,
+    'application': False,
+    'license': 'LGPL-3',
+}

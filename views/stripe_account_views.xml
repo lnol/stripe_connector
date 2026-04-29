@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Form View -->
+    <record id="view_stripe_account_form" model="ir.ui.view">
+        <field name="name">stripe.account.form</field>
+        <field name="model">stripe.account</field>
+        <field name="arch" type="xml">
+            <form string="Stripe Account">
+                <sheet>
+                    <widget name="web_ribbon" title="Archived" bg_color="text-bg-danger" invisible="active"/>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="api_key" password="True" groups="stripe_connector.group_stripe_admin"/>
+                            <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
+                            <field name="active" invisible="1"/>
+                        </group>
+                        <group>
+                            <field name="auto_confirm"/>
+                            <field name="last_fetch_date" readonly="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Journals" name="journals">
+                            <group>
+                                <field name="sales_journal_id"
+                                       domain="[('type', '=', 'sale'), ('company_id', '=', company_id)]"
+                                       options="{'no_create': True}"/>
+                                <field name="bank_journal_id"
+                                       domain="[('type', 'in', ['bank', 'cash']), ('company_id', '=', company_id)]"
+                                       options="{'no_create': True}"/>
+                            </group>
+                        </page>
+                        <page string="Accounting" name="accounting">
+                            <group>
+                                <field name="default_revenue_account_id"
+                                       options="{'no_create': True}"
+                                       groups="account.group_account_readonly"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- List View -->
+    <record id="view_stripe_account_list" model="ir.ui.view">
+        <field name="name">stripe.account.list</field>
+        <field name="model">stripe.account</field>
+        <field name="arch" type="xml">
+            <list string="Stripe Accounts">
+                <field name="name"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="sales_journal_id"/>
+                <field name="auto_confirm"/>
+                <field name="last_fetch_date"/>
+                <field name="active" column_invisible="True"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- Window Action -->
+    <record id="action_stripe_account" model="ir.actions.act_window">
+        <field name="name">Stripe Accounts</field>
+        <field name="res_model">stripe.account</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'active_test': False}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Create your first Stripe account configuration
+            </p>
+        </field>
+    </record>
+
+    <!-- Menu under Accounting > Configuration > Accounting -->
+    <menuitem
+        id="menu_stripe_account"
+        name="Stripe Accounts"
+        parent="account.account_account_menu"
+        action="action_stripe_account"
+        sequence="50"
+        groups="stripe_connector.group_stripe_admin"
+    />
+</odoo>
