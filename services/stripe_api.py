@@ -76,7 +76,9 @@ class StripeApiService:
         return [credit_note for credit_note in credit_notes if credit_note.get('status') == 'issued']
 
     def get_customer(self, customer_id):
-        return self._get('customers/%s' % customer_id)
+        # ``tax_ids`` is a sub-resource and is not returned in the default
+        # customer payload; expand it so we can populate the partner's VAT.
+        return self._get('customers/%s' % customer_id, {'expand[]': ['tax_ids']})
 
     def get_invoice_lines(self, invoice_id):
         return self._paginate('invoices/%s/lines' % invoice_id, {})

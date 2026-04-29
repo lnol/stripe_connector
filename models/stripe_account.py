@@ -182,22 +182,100 @@ class StripeAccount(models.Model):
         partner = self.env['res.partner'].search(
             [('stripe_customer_id', '=', stripe_customer_id)], limit=1
         )
-        if not partner:
-            if customer_data is None and service is not None:
-                customer_data = service.get_customer(stripe_customer_id)
-            data = customer_data or {}
-            partner = self.env['res.partner'].create({
-                'name': (
-                    data.get('name')
-                    or data.get('email')
-                    or stripe_customer_id
-                ),
-                'email': data.get('email') or '',
-                'phone': data.get('phone') or '',
-                'stripe_customer_id': stripe_customer_id,
-                'customer_rank': 1,
-            })
-        return partner
+        if partner:
+            return partner
+        if customer_data is None and service is not None:
+            customer_data = service.get_customer(stripe_customer_id)
+        vals = self._build_partner_vals_from_stripe_customer(
+            customer_data or {}, stripe_customer_id
+        )
+        return self.env['res.partner'].create(vals)
+
+    def _build_partner_vals_from_stripe_customer(self, customer_data, stripe_customer_id):
+        """Map a Stripe customer payload to ``res.partner`` create-vals.
+
+        Stripe's ``customer.name`` doubles as the business name when the
+        customer was collected through a B2B flow; we use it directly for
+        ``res.partner.name``. Email always lands in ``email`` regardless of
+        whether ``name`` falls back to it.
+        """
+        business_name = customer_data.get('name')
+        email = customer_data.get('email') or ''
+        vals = {
+            'name': business_name or email or stripe_customer_id,
+            'email': email,
+            'phone': customer_data.get('phone') or '',
+            'stripe_customer_id': stripe_customer_id,
+            'customer_rank': 1,
+        }
+
+        address = customer_data.get('address') or {}
+        if address.get('line1'):
+            vals['street'] = address['line1']
+        if address.get('line2'):
+            vals['street2'] = address['line2']
+        if address.get('city'):
+            vals['city'] = address['city']
+        if address.get('postal_code'):
+            vals['zip'] = address['postal_code']
+
+        # ``customer.tax.location.country`` (set when Stripe Tax determines a
+        # location) wins over the postal address country; fall back to the
+        # address country if tax determination is absent.
+        country_code = self._stripe_tax_country_code(customer_data) or address.get('country')
+        country = self._resolve_country(country_code)
+        if country:
+            vals['country_id'] = country.id
+            if address.get('state'):
+                state = self._resolve_state(address['state'], country)
+                if state:
+                    vals['state_id'] = state.id
+
+        vat = self._stripe_first_vat_id(customer_data)
+        if vat:
+            vals['vat'] = vat
+            vals['is_company'] = True
+        return vals
+
+    def _resolve_country(self, country_code):
+        if not country_code:
+            return self.env['res.country']
+        return self.env['res.country'].search(
+            [('code', '=', country_code.upper())], limit=1
+        )
+
+    def _resolve_state(self, state_value, country):
+        if not state_value or not country:
+            return self.env['res.country.state']
+        State = self.env['res.country.state']
+        state = State.search(
+            [('country_id', '=', country.id), ('code', '=', state_value)], limit=1
+        )
+        if not state:
+            state = State.search(
+                [('country_id', '=', country.id), ('name', '=ilike', state_value)], limit=1
+            )
+        return state
+
+    def _stripe_tax_country_code(self, customer_data):
+        location = (customer_data.get('tax') or {}).get('location') or {}
+        return location.get('country')
+
+    def _stripe_first_vat_id(self, customer_data):
+        # Stripe returns ``tax_ids`` as a List object ({object: 'list', data: [...]}).
+        # Tolerate a bare list for robustness against API/SDK shape drift.
+        raw = customer_data.get('tax_ids')
+        if isinstance(raw, dict):
+            entries = raw.get('data') or []
+        elif isinstance(raw, list):
+            entries = raw
+        else:
+            entries = []
+        for entry in entries:
+            value = (entry or {}).get('value')
+            if value:
+                return value
+        return False
 
     def _resolve_product(self, stripe_product_id, product_name):
         product_tmpl = self.env['product.template'].search(

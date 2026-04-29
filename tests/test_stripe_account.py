@@ -65,6 +65,93 @@ class TestStripeAccount(TransactionCase):
         partner = self.stripe_account._resolve_partner('cus_NONAME', service)
         self.assertEqual(partner.name, 'fallback@example.com')
 
+    def test_resolve_partner_populates_address(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Acme GmbH',
+            'email': 'billing@acme.de',
+            'phone': '+49 30 1234567',
+            'address': {
+                'line1': 'Hauptstr. 1',
+                'line2': 'Hinterhof',
+                'city': 'Berlin',
+                'postal_code': '10115',
+                'country': 'DE',
+            },
+        }
+        partner = self.stripe_account._resolve_partner('cus_DE001', service)
+        self.assertEqual(partner.street, 'Hauptstr. 1')
+        self.assertEqual(partner.street2, 'Hinterhof')
+        self.assertEqual(partner.city, 'Berlin')
+        self.assertEqual(partner.zip, '10115')
+        self.assertEqual(partner.country_id.code, 'DE')
+
+    def test_resolve_partner_uses_tax_country_over_address_country(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Cross Border Co',
+            'email': 'cb@example.com',
+            'address': {
+                'line1': '1 Wall St',
+                'country': 'US',
+            },
+            'tax': {
+                'location': {'country': 'GB', 'source': 'shipping_destination'},
+            },
+        }
+        partner = self.stripe_account._resolve_partner('cus_TAXCOUNTRY', service)
+        self.assertEqual(partner.country_id.code, 'GB')
+
+    def test_resolve_partner_falls_back_to_address_country(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Address Only',
+            'email': 'a@example.com',
+            'address': {'line1': '14 Rue de Rivoli', 'country': 'FR'},
+        }
+        partner = self.stripe_account._resolve_partner('cus_FR001', service)
+        self.assertEqual(partner.country_id.code, 'FR')
+
+    def test_resolve_partner_populates_vat_from_tax_ids(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'VAT Co',
+            'email': 'vat@example.com',
+            'address': {'country': 'DE'},
+            'tax_ids': {
+                'object': 'list',
+                'data': [
+                    {'id': 'txi_1', 'type': 'eu_vat', 'value': 'DE123456789'},
+                ],
+            },
+        }
+        partner = self.stripe_account._resolve_partner('cus_VAT001', service)
+        self.assertEqual(partner.vat, 'DE123456789')
+        self.assertTrue(partner.is_company)
+
+    def test_resolve_partner_handles_bare_tax_id_list(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Bare List Co',
+            'email': 'bare@example.com',
+            'address': {'country': 'AT'},
+            'tax_ids': [
+                {'id': 'txi_2', 'type': 'eu_vat', 'value': 'ATU12345678'},
+            ],
+        }
+        partner = self.stripe_account._resolve_partner('cus_BARE', service)
+        self.assertEqual(partner.vat, 'ATU12345678')
+
+    def test_resolve_partner_no_tax_ids_does_not_touch_company_flag(self):
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Individual',
+            'email': 'me@example.com',
+        }
+        partner = self.stripe_account._resolve_partner('cus_INDIV', service)
+        self.assertFalse(partner.vat)
+        self.assertFalse(partner.is_company)
+
     # ── _resolve_product ────────────────────────────────────────────────
 
     def test_resolve_product_creates_new(self):

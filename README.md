@@ -7,7 +7,11 @@ Fetch Stripe invoices and credit notes into Odoo Accounting.
 - Periodic (or on-demand) sync of finalized Stripe invoices and issued credit
   notes into `account.move`.
 - Resolves Stripe customers to `res.partner` and Stripe products to
-  `product.template`, creating them on the fly when missing.
+  `product.template`, creating them on the fly when missing. New customers
+  carry over the Stripe business name, email, phone, postal address, taxation
+  country (preferring `customer.tax.location.country` over the postal address),
+  and the first VAT ID from `customer.tax_ids` (which also flips
+  `is_company=True`).
 - Attaches the Stripe-rendered PDF to the move.
 - Multi-currency: each move is created with the currency from the Stripe object.
 - Multi-account, multi-company: each `stripe.account` is scoped to a company
