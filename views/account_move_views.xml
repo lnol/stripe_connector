@@ -5,6 +5,19 @@
         <field name="model">account.move</field>
         <field name="inherit_id" ref="account.view_move_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button name="action_open_stripe_invoice"
+                        type="object"
+                        class="oe_stat_button"
+                        icon="fa-external-link"
+                        invisible="not stripe_invoice_id"
+                        groups="stripe_connector.group_stripe_user">
+                    <div class="o_stat_info">
+                        <span class="o_stat_text">Stripe</span>
+                        <span class="o_stat_text">Document</span>
+                    </div>
+                </button>
+            </xpath>
             <xpath expr="//page[@name='other_info']//group[@name='sale_info_group']" position="inside">
                 <field name="stripe_invoice_id"
                        readonly="1"

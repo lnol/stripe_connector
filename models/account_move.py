@@ -1,4 +1,7 @@
-from odoo import fields, models
+from urllib.parse import quote
+
+from odoo import _, fields, models
+from odoo.exceptions import UserError
 
 
 class AccountMove(models.Model):
@@ -26,3 +29,17 @@ class AccountMove(models.Model):
         readonly=True,
         help='Type of Stripe object imported into this move.',
     )
+
+    def action_open_stripe_invoice(self):
+        self.ensure_one()
+        stripe_object_id = (self.stripe_invoice_id or '').strip()
+        if not stripe_object_id:
+            raise UserError(_('This invoice is not linked to a Stripe object.'))
+
+        path = 'credit_notes' if self.stripe_object_type == 'credit_note' else 'invoices'
+        stripe_object_id = quote(stripe_object_id, safe='')
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'https://dashboard.stripe.com/{path}/{stripe_object_id}',
+            'target': 'new',
+        }

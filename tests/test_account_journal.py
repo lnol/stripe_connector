@@ -67,3 +67,48 @@ class TestAccountJournal(TransactionCase):
             'https://dashboard.stripe.com/products/prod_TEST123',
         )
         self.assertEqual(action['target'], 'new')
+
+    def test_open_stripe_customer_action(self):
+        partner = self.env['res.partner'].new({
+            'name': 'Stripe Customer',
+            'stripe_customer_id': 'cus_TEST123',
+        })
+
+        action = partner.action_open_stripe_customer()
+
+        self.assertEqual(action['type'], 'ir.actions.act_url')
+        self.assertEqual(
+            action['url'],
+            'https://dashboard.stripe.com/customers/cus_TEST123',
+        )
+        self.assertEqual(action['target'], 'new')
+
+    def test_open_stripe_invoice_action(self):
+        move = self.env['account.move'].new({
+            'stripe_invoice_id': 'in_TEST123',
+            'stripe_object_type': 'invoice',
+        })
+
+        action = move.action_open_stripe_invoice()
+
+        self.assertEqual(action['type'], 'ir.actions.act_url')
+        self.assertEqual(
+            action['url'],
+            'https://dashboard.stripe.com/invoices/in_TEST123',
+        )
+        self.assertEqual(action['target'], 'new')
+
+    def test_open_stripe_credit_note_action(self):
+        move = self.env['account.move'].new({
+            'stripe_invoice_id': 'cn_TEST123',
+            'stripe_object_type': 'credit_note',
+        })
+
+        action = move.action_open_stripe_invoice()
+
+        self.assertEqual(action['type'], 'ir.actions.act_url')
+        self.assertEqual(
+            action['url'],
+            'https://dashboard.stripe.com/credit_notes/cn_TEST123',
+        )
+        self.assertEqual(action['target'], 'new')

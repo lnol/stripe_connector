@@ -5,6 +5,19 @@
         <field name="model">res.partner</field>
         <field name="inherit_id" ref="base.view_partner_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button name="action_open_stripe_customer"
+                        type="object"
+                        class="oe_stat_button"
+                        icon="fa-external-link"
+                        invisible="not stripe_customer_id"
+                        groups="stripe_connector.group_stripe_user">
+                    <div class="o_stat_info">
+                        <span class="o_stat_text">Stripe</span>
+                        <span class="o_stat_text">Customer</span>
+                    </div>
+                </button>
+            </xpath>
             <xpath expr="//page[@name='sales_purchases']//group[@name='sale']" position="inside">
                 <field name="stripe_customer_id"
                        readonly="1"
