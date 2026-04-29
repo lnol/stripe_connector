@@ -55,6 +55,13 @@ class StripeAccount(models.Model):
         default=False,
         help='Automatically post imported invoices and credit notes.',
     )
+    invoice_cutoff_date = fields.Date(
+        string='Cut-off Date',
+        help=(
+            'Invoices finalized before this date are ignored. Use this to avoid '
+            'importing historical invoices that were already handled manually.'
+        ),
+    )
     active = fields.Boolean(
         string='Active',
         default=True,
@@ -316,7 +323,14 @@ class StripeAccount(models.Model):
 
     def _fetch_stripe_objects(self, service):
         return [
-            ('invoice', 'out_invoice', service.get_invoices(created_after=self.last_fetch_at)),
+            (
+                'invoice',
+                'out_invoice',
+                service.get_invoices(
+                    created_after=self.last_fetch_at,
+                    finalized_after=self.invoice_cutoff_date,
+                ),
+            ),
             ('credit_note', 'out_refund', service.get_credit_notes(created_after=self.last_fetch_at)),
         ]
 

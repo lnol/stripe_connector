@@ -21,7 +21,9 @@
             <xpath expr="//page[@name='sales_purchases']//group[@name='sale']" position="inside">
                 <field name="stripe_customer_id"
                        readonly="1"
-                       groups="stripe_connector.group_stripe_user"/>
+                       groups="stripe_connector.group_stripe_user,!stripe_connector.group_stripe_admin"/>
+                <field name="stripe_customer_id"
+                       groups="stripe_connector.group_stripe_admin"/>
             </xpath>
         </field>
     </record>

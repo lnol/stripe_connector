@@ -1,3 +1,4 @@
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from odoo.tests import tagged
@@ -39,3 +40,37 @@ class TestStripeApiService(TransactionCase):
             service.get_credit_note_lines('cn_TEST')
 
         mock_paginate.assert_called_once_with('credit_notes/cn_TEST/lines', {})
+
+    def test_get_invoices_filters_by_finalized_after(self):
+        service = StripeApiService('sk_test_dummy')
+        cutoff_ts = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())
+        invoices = [
+            {
+                'id': 'in_BEFORE',
+                'status': 'paid',
+                'status_transitions': {'finalized_at': cutoff_ts - 1},
+            },
+            {
+                'id': 'in_ON_CUTOFF',
+                'status': 'open',
+                'status_transitions': {'finalized_at': cutoff_ts},
+            },
+            {
+                'id': 'in_AFTER',
+                'status': 'paid',
+                'status_transitions': {'finalized_at': cutoff_ts + 1},
+            },
+            {
+                'id': 'in_DRAFT',
+                'status': 'draft',
+                'status_transitions': {'finalized_at': cutoff_ts + 1},
+            },
+        ]
+
+        with patch.object(service, '_paginate', return_value=invoices):
+            result = service.get_invoices(finalized_after=date(2024, 1, 15))
+
+        self.assertEqual(
+            [invoice['id'] for invoice in result],
+            ['in_ON_CUTOFF', 'in_AFTER'],
+        )

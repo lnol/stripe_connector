@@ -54,9 +54,22 @@ class StripeApiService:
         timestamp = self._to_stripe_timestamp(created_after)
         return {'created[gt]': timestamp} if timestamp else {}
 
-    def get_invoices(self, created_after=None):
+    def _is_finalized_on_or_after(self, invoice, finalized_after):
+        timestamp = self._to_stripe_timestamp(finalized_after)
+        if not timestamp:
+            return True
+
+        status_transitions = invoice.get('status_transitions') or {}
+        finalized_at = status_transitions.get('finalized_at')
+        return bool(finalized_at and finalized_at >= timestamp)
+
+    def get_invoices(self, created_after=None, finalized_after=None):
         all_invoices = self._paginate('invoices', self._created_params(created_after))
-        return [inv for inv in all_invoices if inv.get('status') != 'draft']
+        return [
+            inv for inv in all_invoices
+            if inv.get('status') != 'draft'
+            and self._is_finalized_on_or_after(inv, finalized_after)
+        ]
 
     def get_credit_notes(self, created_after=None):
         credit_notes = self._paginate('credit_notes', self._created_params(created_after))

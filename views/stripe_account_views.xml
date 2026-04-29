@@ -17,6 +17,7 @@
                         </group>
                         <group>
                             <field name="auto_confirm"/>
+                            <field name="invoice_cutoff_date"/>
                             <field name="last_fetch_at" readonly="1"/>
                         </group>
                     </group>
@@ -71,6 +72,7 @@
                 <field name="company_id" groups="base.group_multi_company"/>
                 <field name="sales_journal_id"/>
                 <field name="auto_confirm"/>
+                <field name="invoice_cutoff_date"/>
                 <field name="last_fetch_at"/>
                 <field name="active" column_invisible="True"/>
             </list>

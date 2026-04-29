@@ -50,6 +50,7 @@ class TestAccountJournal(TransactionCase):
         self.assertIn('stripe_customer_id', self.env['res.partner']._fields)
 
         self.assertIn('stripe_invoice_id', self.env['account.move']._fields)
+        self.assertFalse(self.env['account.move']._fields['stripe_invoice_id'].readonly)
         self.assertIn('stripe_product_id', self.env['product.template']._fields)
 
     def test_open_stripe_product_action(self):

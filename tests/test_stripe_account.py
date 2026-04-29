@@ -317,6 +317,24 @@ class TestStripeAccount(TransactionCase):
             created_after = call_args[0]
         self.assertIsNotNone(created_after)
 
+    def test_fetch_invoices_passes_invoice_cutoff_date(self):
+        cutoff_date = fields.Date.to_date('2024-02-01')
+        self.stripe_account.invoice_cutoff_date = cutoff_date
+        service = MagicMock()
+        service.get_invoices.return_value = []
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            self.stripe_account._fetch_invoices()
+
+        service.get_invoices.assert_called_once()
+        self.assertEqual(
+            service.get_invoices.call_args.kwargs.get('finalized_after'),
+            cutoff_date,
+        )
+
     def test_fetch_invoices_does_not_advance_watermark_on_failure(self):
         previous_fetch_at = fields.Datetime.to_datetime('2024-01-01 12:00:00')
         self.stripe_account.last_fetch_at = previous_fetch_at

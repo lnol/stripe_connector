@@ -21,8 +21,12 @@
             <xpath expr="//page[@name='general_information']" position="inside">
                 <group string="Stripe"
                        invisible="not stripe_product_id"
-                       groups="stripe_connector.group_stripe_user">
+                       groups="stripe_connector.group_stripe_user,!stripe_connector.group_stripe_admin">
                     <field name="stripe_product_id" readonly="1"/>
+                </group>
+                <group string="Stripe"
+                       groups="stripe_connector.group_stripe_admin">
+                    <field name="stripe_product_id"/>
                 </group>
             </xpath>
         </field>
