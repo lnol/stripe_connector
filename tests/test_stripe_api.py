@@ -74,3 +74,37 @@ class TestStripeApiService(TransactionCase):
             [invoice['id'] for invoice in result],
             ['in_ON_CUTOFF', 'in_AFTER'],
         )
+
+    def test_get_credit_notes_filters_by_created_cutoff(self):
+        service = StripeApiService('sk_test_dummy')
+        cutoff_ts = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())
+        credit_notes = [
+            {
+                'id': 'cn_BEFORE',
+                'status': 'issued',
+                'created': cutoff_ts - 1,
+            },
+            {
+                'id': 'cn_ON_CUTOFF',
+                'status': 'issued',
+                'created': cutoff_ts,
+            },
+            {
+                'id': 'cn_AFTER',
+                'status': 'issued',
+                'created': cutoff_ts + 1,
+            },
+            {
+                'id': 'cn_DRAFT',
+                'status': 'draft',
+                'created': cutoff_ts + 1,
+            },
+        ]
+
+        with patch.object(service, '_paginate', return_value=credit_notes):
+            result = service.get_credit_notes(created_on_or_after=date(2024, 1, 15))
+
+        self.assertEqual(
+            [credit_note['id'] for credit_note in result],
+            ['cn_ON_CUTOFF', 'cn_AFTER'],
+        )

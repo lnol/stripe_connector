@@ -58,7 +58,7 @@ account you want to import from:
 | **Bank/Cash Journal** | no | Currently informational; future-use for reconciliation. |
 | **Default Revenue Account** | no | Fallback when the resolved product has no income account set. |
 | **Auto-Confirm Invoices** | no, default `off` | Posts the move on import. **Leave off unless your Stripe account is tax-free** — see *What it does not do*. |
-| **Cut-off Date** | no | Stripe invoices finalized strictly before this date are ignored. Use this when going live to skip historical data already booked manually. |
+| **Cut-off Date** | no | Stripe invoices finalized and credit notes issued strictly before this date are ignored. Use this when going live to skip historical data already booked manually. |
 | **Fetch Lookback (days)** | no, default `90` | On every fetch, also re-scan invoices created within this many days. Catches subscription invoices that were created earlier but only finalized recently. Already-imported invoices are deduplicated by SQL UNIQUE. Increase if your subscription drafts can sit unfinalized for longer than 90 days. |
 
 ## Usage
@@ -117,8 +117,8 @@ dashboard:
 
 ## Known limitations
 
-- First fetch with no `Cut-off Date` walks every invoice in the Stripe
-  account. Set a cut-off before installing in a long-lived Stripe account.
+- First fetch with no `Cut-off Date` walks every invoice and credit note in the
+  Stripe account. Set a cut-off before installing in a long-lived Stripe account.
 - The Stripe API list endpoint cannot filter by `finalized_at`; the lookback
   window above is the workaround. If draft-to-finalize windows can exceed 90
   days for your business, raise *Fetch Lookback (days)*.

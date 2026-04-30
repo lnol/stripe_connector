@@ -72,8 +72,9 @@ class StripeAccount(models.Model):
     invoice_cutoff_date = fields.Date(
         string='Cut-off Date',
         help=(
-            'Invoices finalized before this date are ignored. Use this to avoid '
-            'importing historical invoices that were already handled manually.'
+            'Invoices finalized and credit notes issued before this date are ignored. '
+            'Use this to avoid importing historical Stripe objects that were already '
+            'handled manually.'
         ),
     )
     active = fields.Boolean(
@@ -548,6 +549,21 @@ class StripeAccount(models.Model):
                 floor = cutoff_dt
         return floor
 
+    def _get_credit_note_fetch_floor(self):
+        """Lower bound for ``created`` when listing credit notes."""
+        self.ensure_one()
+        floor = self.last_fetch_at
+        cutoff = self.invoice_cutoff_date
+        if cutoff:
+            cutoff_dt = datetime.combine(cutoff, datetime.min.time())
+            # Stripe's API only supports ``created[gt]``. Step back one second
+            # so credit notes created exactly at the start of the cut-off date
+            # remain eligible, then let the service-side filter enforce >=.
+            cutoff_query_floor = cutoff_dt - timedelta(seconds=1)
+            if not floor or cutoff_query_floor > floor:
+                floor = cutoff_query_floor
+        return floor
+
     def _fetch_stripe_objects(self, service):
         return [
             (
@@ -558,7 +574,14 @@ class StripeAccount(models.Model):
                     finalized_after=self.invoice_cutoff_date,
                 ),
             ),
-            ('credit_note', 'out_refund', service.get_credit_notes(created_after=self.last_fetch_at)),
+            (
+                'credit_note',
+                'out_refund',
+                service.get_credit_notes(
+                    created_after=self._get_credit_note_fetch_floor(),
+                    created_on_or_after=self.invoice_cutoff_date,
+                ),
+            ),
         ]
 
     def _process_batch_item(self, run, stripe_obj, service, move_type, stripe_object_type):

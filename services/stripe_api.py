@@ -63,6 +63,14 @@ class StripeApiService:
         finalized_at = status_transitions.get('finalized_at')
         return bool(finalized_at and finalized_at >= timestamp)
 
+    def _is_created_on_or_after(self, stripe_object, created_on_or_after):
+        timestamp = self._to_stripe_timestamp(created_on_or_after)
+        if not timestamp:
+            return True
+
+        created = stripe_object.get('created')
+        return bool(created and created >= timestamp)
+
     def get_invoices(self, created_after=None, finalized_after=None):
         all_invoices = self._paginate('invoices', self._created_params(created_after))
         return [
@@ -71,9 +79,13 @@ class StripeApiService:
             and self._is_finalized_on_or_after(inv, finalized_after)
         ]
 
-    def get_credit_notes(self, created_after=None):
+    def get_credit_notes(self, created_after=None, created_on_or_after=None):
         credit_notes = self._paginate('credit_notes', self._created_params(created_after))
-        return [credit_note for credit_note in credit_notes if credit_note.get('status') == 'issued']
+        return [
+            credit_note for credit_note in credit_notes
+            if credit_note.get('status') == 'issued'
+            and self._is_created_on_or_after(credit_note, created_on_or_after)
+        ]
 
     def get_customer(self, customer_id):
         # ``tax_ids`` is a sub-resource and is not returned in the default

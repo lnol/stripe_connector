@@ -619,6 +619,29 @@ class TestStripeAccount(TransactionCase):
             cutoff_date,
         )
 
+    def test_fetch_invoices_passes_credit_note_cutoff_date(self):
+        cutoff_date = fields.Date.to_date('2024-02-01')
+        self.stripe_account.last_fetch_at = False
+        self.stripe_account.invoice_cutoff_date = cutoff_date
+        service = MagicMock()
+        service.get_invoices.return_value = []
+        service.get_credit_notes.return_value = []
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            self.stripe_account._fetch_invoices()
+
+        service.get_credit_notes.assert_called_once()
+        self.assertEqual(
+            service.get_credit_notes.call_args.kwargs.get('created_on_or_after'),
+            cutoff_date,
+        )
+        self.assertEqual(
+            service.get_credit_notes.call_args.kwargs.get('created_after'),
+            datetime(2024, 1, 31, 23, 59, 59),
+        )
+
     def test_fetch_floor_applies_lookback(self):
         self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
         self.stripe_account.fetch_lookback_days = 30
@@ -642,6 +665,12 @@ class TestStripeAccount(TransactionCase):
         self.stripe_account.last_fetch_at = False
         self.stripe_account.invoice_cutoff_date = False
         self.assertFalse(self.stripe_account._get_invoice_fetch_floor())
+
+    def test_credit_note_fetch_floor_uses_last_fetch_after_cutoff(self):
+        self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
+        self.stripe_account.invoice_cutoff_date = fields.Date.to_date('2024-02-01')
+        floor = self.stripe_account._get_credit_note_fetch_floor()
+        self.assertEqual(floor, fields.Datetime.to_datetime('2024-04-01 00:00:00'))
 
     def test_fetch_invoices_uses_lookback_floor(self):
         self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
