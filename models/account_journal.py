@@ -8,13 +8,14 @@ class AccountJournal(models.Model):
     stripe_account_ids = fields.One2many(
         comodel_name='stripe.account',
         inverse_name='sales_journal_id',
+        string='Stripe Accounts',
         # Include archived stripe.account records so the compute below is
         # invalidated when one of them flips ``active``.
         context={'active_test': False},
     )
     stripe_account_id = fields.Many2one(
         comodel_name='stripe.account',
-        string='Stripe Account',
+        string='Active Stripe Account',
         compute='_compute_stripe_account_id',
     )
     show_stripe_fetch_button = fields.Boolean(
