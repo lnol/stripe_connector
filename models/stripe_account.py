@@ -3,13 +3,18 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+from psycopg2 import InterfaceError, OperationalError
+
 from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
-from odoo.tools import html_escape
+from odoo.tools import config, html_escape
 
 from ..services.stripe_api import StripeApiService
 
 _logger = logging.getLogger(__name__)
+_CRON_TIME_BUDGET_MESSAGE = _(
+    'Cron time budget exhausted; remaining Stripe objects will be retried on the next run.'
+)
 _STRIPE_DESCRIPTION_QUANTITY_RE = re.compile(
     r'^\s*\d+(?:[.,]\d+)?\s*(?:x|\u00d7)\s+'
 )
@@ -20,6 +25,12 @@ _STRIPE_DESCRIPTION_PRICE_RE = re.compile(
     r'[^)]*\)\s*$',
     re.IGNORECASE,
 )
+
+
+def _is_closed_db_connection_error(error):
+    return isinstance(error, InterfaceError) or (
+        isinstance(error, OperationalError) and 'closed' in str(error).lower()
+    )
 
 
 class StripeAccount(models.Model):
@@ -118,27 +129,32 @@ class StripeAccount(models.Model):
         return StripeApiService(self.api_key)
 
     def _create_import_run(self):
-        """Create the import run on the current cursor.
-
-        We deliberately do NOT use ``self.env.registry.cursor()`` to commit the
-        run early for mid-fetch UI visibility: Odoo runs cursors at REPEATABLE
-        READ isolation, so the main cursor's snapshot is taken at its first
-        ``SELECT`` and excludes any commits made afterwards by another cursor.
-        Subsequent reads on the run from the main cursor (notably the ones
-        ``mail.thread.message_post`` performs) would then raise ``MissingError``
-        even though the row is in the database.
-
-        The trade-off is that other connections (e.g. a browser viewing the
-        Stripe Account form) only see the run after the cron transaction
-        commits at end-of-job; for a typical daily fetch that is a matter of
-        seconds, which is acceptable.
-        """
+        """Create the import run on the current cursor."""
         self.ensure_one()
         return self.env['stripe.import.run'].create({
             'stripe_account_id': self.id,
             'state': 'running',
             'message': _('Stripe fetch is running.'),
         })
+
+    def _commit_import_progress(self, processed=0, remaining=None):
+        """Commit cron work so a worker reload cannot roll back the whole run.
+
+        ``ir.cron._commit_progress`` also tells us when the current cron worker
+        is out of time, letting the next scheduled run resume via deduplication.
+        Keep direct unit-test calls transactional so TransactionCase can roll
+        them back normally.
+        """
+        if not self.env.context.get('stripe_commit_progress') or config.get('test_enable'):
+            return True
+
+        commit_progress = getattr(self.env['ir.cron'].sudo(), '_commit_progress', None)
+        if commit_progress:
+            seconds_left = commit_progress(processed=processed, remaining=remaining)
+            return seconds_left is None or seconds_left > 0
+
+        self.env.cr.commit()
+        return True
 
     def _reap_stale_running_runs(self):
         """Fail any leftover ``running`` runs before starting a new fetch.
@@ -171,11 +187,14 @@ class StripeAccount(models.Model):
         })
 
     def _prefetch_stripe_data(self, stripe_obj, service, stripe_object_type):
-        """Fetch all remote Stripe data before entering any DB savepoint.
+        """Fetch remote Stripe data needed to build the accounting move.
 
         Stripe API calls (HTTP) inside a gevent savepoint can trigger a
         greenlet switch that closes the DB cursor, corrupting the transaction.
-        Pre-fetching here keeps the savepoint free of network I/O.
+        Pre-fetching customer/line data here keeps the savepoint free of
+        network I/O. PDF downloads are deliberately left until after the move
+        and import line have been committed, because PDFs are non-accounting
+        metadata and can be retried or skipped without losing the import.
         """
         result = {}
         stripe_customer_id = stripe_obj.get('customer')
@@ -186,16 +205,6 @@ class StripeAccount(models.Model):
             if not existing_partner:
                 result['customer_data'] = service.get_customer(stripe_customer_id)
         result['stripe_lines'] = self._get_stripe_lines(stripe_obj, service, stripe_object_type)
-        pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
-        pdf_url = stripe_obj.get(pdf_field)
-        if pdf_url:
-            try:
-                result['pdf_bytes'] = service.get_pdf(pdf_url)
-                result['pdf_field'] = pdf_field
-            except Exception as exc:
-                _logger.warning(
-                    'Could not prefetch Stripe PDF for %s: %s', stripe_obj.get('id'), exc
-                )
         return result
 
     def _resolve_partner(self, stripe_customer_id, service=None, customer_data=None):
@@ -442,7 +451,9 @@ class StripeAccount(models.Model):
                 'res_model': 'account.move',
                 'res_id': move.id,
             })
-        except Exception:
+        except Exception as error:
+            if _is_closed_db_connection_error(error):
+                raise
             _logger.exception('Could not attach Stripe PDF for %s', stripe_obj.get('id'))
 
     def _get_existing_move(self, stripe_id):
@@ -584,7 +595,9 @@ class StripeAccount(models.Model):
             ),
         ]
 
-    def _process_batch_item(self, run, stripe_obj, service, move_type, stripe_object_type):
+    def _process_batch_item(
+        self, run, stripe_obj, service, move_type, stripe_object_type, remaining_after=None
+    ):
         stripe_id = stripe_obj.get('id')
         # Pre-fetch all Stripe API data before entering the DB savepoint.
         # HTTP calls inside a savepoint can trigger gevent greenlet switches
@@ -593,46 +606,53 @@ class StripeAccount(models.Model):
         try:
             prefetched = self._prefetch_stripe_data(stripe_obj, service, stripe_object_type)
         except Exception as error:
+            if _is_closed_db_connection_error(error):
+                raise
             message = '%s: %s' % (error.__class__.__name__, error)
             _logger.exception('Error prefetching Stripe data for %s %s', stripe_object_type, stripe_id)
             self._record_import_line(run, stripe_obj, stripe_object_type, 'failed', message)
-            return 'failed', message
+            keep_going = self._commit_import_progress(processed=1, remaining=remaining_after)
+            return 'failed', message, keep_going
 
         try:
             with self.env.cr.savepoint():
                 move, state, message = self._process_stripe_object(
                     stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched
                 )
-            # PDF attachment happens outside the savepoint so that the HTTP call to
-            # download the PDF cannot trigger a gevent greenlet switch while a DB
-            # savepoint is active, which would corrupt the cursor for all subsequent
-            # operations in this request.
-            if state == 'done':
+            self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
+            keep_going = self._commit_import_progress(
+                processed=1,
+                remaining=remaining_after,
+            )
+            # Optional PDFs are fetched only after the accounting result is durable.
+            if state == 'done' and keep_going:
                 pdf_field = 'pdf' if stripe_object_type == 'credit_note' else 'invoice_pdf'
-                pdf_bytes = prefetched.get('pdf_bytes') if prefetched else None
-                # If prefetch already attempted the download (pdf_url exists but
-                # pdf_bytes is absent), the error was already logged — don't retry
-                # with the same URL.
-                pdf_url = stripe_obj.get(pdf_field)
-                already_attempted = prefetched is not None and pdf_url and 'pdf_bytes' not in prefetched
                 self._attach_pdf(
                     move, stripe_obj,
-                    service=None if already_attempted else service,
+                    service=service,
                     pdf_field=pdf_field,
-                    pdf_bytes=pdf_bytes,
                 )
-            self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
-            return state, False
+                keep_going = self._commit_import_progress(remaining=remaining_after)
+            return state, False, keep_going
         except Exception as error:
+            if _is_closed_db_connection_error(error):
+                raise
             message = '%s: %s' % (error.__class__.__name__, error)
             _logger.exception('Error processing Stripe %s %s', stripe_object_type, stripe_id)
             try:
                 self._record_import_line(run, stripe_obj, stripe_object_type, 'failed', message)
-            except Exception:
+                keep_going = self._commit_import_progress(
+                    processed=1,
+                    remaining=remaining_after,
+                )
+            except Exception as line_error:
+                if _is_closed_db_connection_error(line_error):
+                    raise
                 _logger.exception(
                     'Could not record failure line for Stripe %s %s', stripe_object_type, stripe_id
                 )
-            return 'failed', message
+                keep_going = True
+            return 'failed', message, keep_going
 
     def _finish_import_run(self, run, counts, failures):
         finished_at = fields.Datetime.now()
@@ -690,11 +710,12 @@ class StripeAccount(models.Model):
         accounts = self.sudo().search([('active', '=', True)])
         _logger.info('Stripe cron: fetching for %d active account(s)', len(accounts))
         for account in accounts:
+            account_name = account.name
             try:
-                account._fetch_invoices()
+                account.with_context(stripe_commit_progress=True)._fetch_invoices()
             except Exception:
                 _logger.exception(
-                    'Unhandled error during Stripe invoice fetch for account %s', account.name
+                    'Unhandled error during Stripe invoice fetch for account %s', account_name
                 )
 
     def _fetch_invoices(self):
@@ -704,6 +725,7 @@ class StripeAccount(models.Model):
         run = self._create_import_run()
         run.message_post(body=_('Stripe fetch started for %s.', self.display_name))
         _logger.info('Stripe fetch started for account %s', self.display_name)
+        self._commit_import_progress()
 
         counts = {
             'invoice': 0,
@@ -723,12 +745,25 @@ class StripeAccount(models.Model):
             failures.append(message)
             batches = []
 
+        remaining = sum(len(stripe_objects) for _, _, stripe_objects in batches)
+        if remaining and not self._commit_import_progress(remaining=remaining):
+            failures.append(_CRON_TIME_BUDGET_MESSAGE)
+            batches = []
+            remaining = 0
+        stop_requested = False
         for stripe_object_type, move_type, stripe_objects in batches:
             counts[stripe_object_type] += len(stripe_objects)
             for stripe_obj in stripe_objects:
-                state, failure = self._process_batch_item(
-                    run, stripe_obj, service, move_type, stripe_object_type
+                remaining_after = remaining - 1
+                state, failure, keep_going = self._process_batch_item(
+                    run,
+                    stripe_obj,
+                    service,
+                    move_type,
+                    stripe_object_type,
+                    remaining_after=remaining_after,
                 )
+                remaining = remaining_after
                 counts[state] += 1
                 if failure:
                     failures.append('%s %s: %s' % (
@@ -736,6 +771,12 @@ class StripeAccount(models.Model):
                         stripe_obj.get('id'),
                         failure,
                     ))
+                if not keep_going:
+                    failures.append(_CRON_TIME_BUDGET_MESSAGE)
+                    stop_requested = True
+                    break
+            if stop_requested:
+                break
 
         state = self._finish_import_run(run, counts, failures)
         if state == 'done':
@@ -746,4 +787,5 @@ class StripeAccount(models.Model):
                 self.display_name,
                 state,
             )
+        self._commit_import_progress(remaining=0)
         return run
