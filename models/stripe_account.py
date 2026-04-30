@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from odoo import _, api, fields, models
+from odoo.exceptions import ValidationError
 from odoo.tools import html_escape
 
 from ..services.stripe_api import StripeApiService
@@ -196,7 +197,32 @@ class StripeAccount(models.Model):
         vals = self._build_partner_vals_from_stripe_customer(
             customer_data or {}, stripe_customer_id
         )
-        return self.env['res.partner'].create(vals)
+        return self._create_partner_with_vat_fallback(vals)
+
+    def _create_partner_with_vat_fallback(self, vals):
+        """Create the partner; if Odoo rejects the VAT, drop it and retry once.
+
+        Stripe-supplied VAT values occasionally fail Odoo's ``base_vat`` checks
+        (wrong country prefix for the type, free-text noise, format change…).
+        We never want a single bad VAT to fail the whole invoice import, so we
+        log a warning and create the partner without the VAT. ``is_company``
+        is kept ``True`` — the customer was clearly a business in Stripe,
+        only the VAT field is unusable.
+        """
+        Partner = self.env['res.partner']
+        if not vals.get('vat'):
+            return Partner.create(vals)
+        try:
+            with self.env.cr.savepoint():
+                return Partner.create(vals)
+        except ValidationError as error:
+            bad_vat = vals.pop('vat', None)
+            _logger.warning(
+                'Stripe customer %s: VAT %r rejected by Odoo (%s); creating '
+                'partner without VAT.',
+                vals.get('stripe_customer_id'), bad_vat, error,
+            )
+            return Partner.create(vals)
 
     def _build_partner_vals_from_stripe_customer(self, customer_data, stripe_customer_id):
         """Map a Stripe customer payload to ``res.partner`` create-vals.

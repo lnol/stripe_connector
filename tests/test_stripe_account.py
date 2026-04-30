@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from odoo import SUPERUSER_ID, fields
+from odoo.exceptions import ValidationError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
 
@@ -141,6 +142,38 @@ class TestStripeAccount(TransactionCase):
         }
         partner = self.stripe_account._resolve_partner('cus_BARE', service)
         self.assertEqual(partner.vat, 'ATU12345678')
+
+    def test_resolve_partner_drops_invalid_vat_and_retries(self):
+        """Simulate base_vat rejecting the VAT — partner is still created."""
+        service = MagicMock()
+        service.get_customer.return_value = {
+            'name': 'Bad VAT Co',
+            'email': 'badvat@example.com',
+            'address': {'country': 'NL'},
+            'tax_ids': {
+                'object': 'list',
+                'data': [{'id': 'txi_x', 'type': 'eu_vat', 'value': 'NL_BAD_VAT'}],
+            },
+        }
+        Partner = type(self.env['res.partner'])
+        original_create = Partner.create
+        seen = []
+
+        def stub_create(self_, vals_list):
+            normalized = vals_list if isinstance(vals_list, list) else [vals_list]
+            seen.append([dict(v) for v in normalized])
+            if any(v.get('vat') for v in normalized):
+                raise ValidationError('VAT NL_BAD_VAT does not seem to be valid.')
+            return original_create(self_, vals_list)
+
+        with patch.object(Partner, 'create', stub_create):
+            partner = self.stripe_account._resolve_partner('cus_BADVAT', service)
+
+        self.assertFalse(partner.vat)
+        self.assertTrue(partner.is_company)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0][0].get('vat'), 'NL_BAD_VAT')
+        self.assertNotIn('vat', seen[1][0])
 
     def test_resolve_partner_no_tax_ids_does_not_touch_company_flag(self):
         service = MagicMock()
