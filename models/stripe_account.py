@@ -12,7 +12,7 @@ from odoo.tools import config, html_escape
 from ..services.stripe_api import StripeApiService
 
 _logger = logging.getLogger(__name__)
-_CRON_TIME_BUDGET_MESSAGE = _(
+_CRON_TIME_BUDGET_MESSAGE = (
     'Cron time budget exhausted; remaining Stripe objects will be retried on the next run.'
 )
 _STRIPE_DESCRIPTION_QUANTITY_RE = re.compile(
