@@ -344,6 +344,36 @@ class StripeAccount(models.Model):
             return float(unit_amount) / 100.0
         return ((line.get('amount') or 0) / 100.0) / quantity
 
+    def _has_deferred_date_fields(self):
+        move_line_fields = self.env['account.move.line']._fields
+        return (
+            'deferred_start_date' in move_line_fields
+            and 'deferred_end_date' in move_line_fields
+        )
+
+    def _stripe_timestamp_to_date(self, timestamp):
+        if timestamp is None:
+            return False
+        try:
+            return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).date()
+        except (OSError, TypeError, ValueError, OverflowError):
+            return False
+
+    def _get_line_deferred_date_vals(self, line):
+        if not self._has_deferred_date_fields():
+            return {}
+
+        period = line.get('period') or {}
+        start_date = self._stripe_timestamp_to_date(period.get('start'))
+        end_date = self._stripe_timestamp_to_date(period.get('end'))
+        if not start_date or not end_date or start_date > end_date:
+            return {}
+
+        return {
+            'deferred_start_date': start_date,
+            'deferred_end_date': end_date,
+        }
+
     def _get_line_account_id(self, product_tmpl):
         if product_tmpl and product_tmpl.property_account_income_id:
             return product_tmpl.property_account_income_id.id
@@ -363,6 +393,7 @@ class StripeAccount(models.Model):
             'quantity': line.get('quantity') or 1,
             'price_unit': self._get_line_price_unit(line),
         }
+        line_vals.update(self._get_line_deferred_date_vals(line))
         if product_tmpl and product_tmpl.product_variant_ids:
             line_vals['product_id'] = product_tmpl.product_variant_ids[:1].id
 

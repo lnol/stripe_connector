@@ -5,6 +5,13 @@ from odoo.exceptions import AccessError
 class AccountJournal(models.Model):
     _inherit = 'account.journal'
 
+    stripe_account_ids = fields.One2many(
+        comodel_name='stripe.account',
+        inverse_name='sales_journal_id',
+        # Include archived stripe.account records so the compute below is
+        # invalidated when one of them flips ``active``.
+        context={'active_test': False},
+    )
     stripe_account_id = fields.Many2one(
         comodel_name='stripe.account',
         string='Stripe Account',
@@ -15,19 +22,12 @@ class AccountJournal(models.Model):
         compute='_compute_show_stripe_fetch_button',
     )
 
-    @api.depends('type', 'company_id')
+    @api.depends('stripe_account_ids', 'stripe_account_ids.active')
     def _compute_stripe_account_id(self):
-        if not self:
-            return
-        accounts = self.env['stripe.account'].search([
-            ('sales_journal_id', 'in', self.ids),
-            ('active', '=', True),
-        ])
-        # ``stripe.account`` enforces ``_check_company_auto`` so the journal's
-        # company already matches the account's company — no second filter needed.
-        by_journal = {a.sales_journal_id.id: a for a in accounts}
+        # ``stripe.account`` enforces ``_check_company_auto`` so the company
+        # filter is implicit through the inverse FK.
         for journal in self:
-            journal.stripe_account_id = by_journal.get(journal.id, False)
+            journal.stripe_account_id = journal.stripe_account_ids.filtered('active')[:1]
 
     @api.depends('stripe_account_id')
     def _compute_show_stripe_fetch_button(self):

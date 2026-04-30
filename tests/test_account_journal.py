@@ -13,6 +13,12 @@ class TestAccountJournal(TransactionCase):
             ('type', '=', 'sale'),
             ('company_id', '=', cls.company.id),
         ], limit=1)
+        # Archive any pre-existing stripe accounts on this journal so the test
+        # class owns the only active stripe.account in scope. The class-level
+        # savepoint restores them when the class tears down.
+        cls.env['stripe.account'].with_context(active_test=False).search([
+            ('sales_journal_id', '=', cls.sales_journal.id),
+        ]).write({'active': False})
         cls.stripe_account = cls.env['stripe.account'].create({
             'name': 'Test Stripe Journal',
             'api_key': 'sk_test_dummy',

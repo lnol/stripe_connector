@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,10 @@ class TestStripeAccount(TransactionCase):
             ('account_type', '=', 'income'),
             ('company_ids', 'in', [cls.company.id]),
         ], limit=1)
+        # Archive any pre-existing stripe accounts so the cron-iteration tests
+        # don't pick up real production records that might exist on this DB.
+        # The class-level savepoint restores them when the class tears down.
+        cls.env['stripe.account'].with_context(active_test=False).search([]).write({'active': False})
         cls.stripe_account = cls.env['stripe.account'].create({
             'name': 'Test Stripe',
             'api_key': 'sk_test_dummy',
@@ -29,6 +34,22 @@ class TestStripeAccount(TransactionCase):
             'sales_journal_id': cls.sales_journal.id,
             'default_revenue_account_id': cls.revenue_account.id,
         })
+
+    @contextmanager
+    def _disable_vat_check(self):
+        """Skip Odoo's VAT validation for the duration of the block.
+
+        ``base_vat``'s ``_inverse_vat`` calls ``_check_vat`` which can reject
+        Stripe-formatted VAT values that fail country-specific checksums.
+        Tests focused on Stripe→Odoo extraction should not depend on those
+        rules; if ``base_vat`` is not installed this is a no-op.
+        """
+        Partner = type(self.env['res.partner'])
+        if not hasattr(Partner, '_inverse_vat'):
+            yield
+            return
+        with patch.object(Partner, '_inverse_vat', lambda partner_self: None):
+            yield
 
     # ── _resolve_partner ────────────────────────────────────────────────
 
@@ -114,6 +135,9 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(partner.country_id.code, 'FR')
 
     def test_resolve_partner_populates_vat_from_tax_ids(self):
+        # The intent of this test is the Stripe→Odoo extraction, not Odoo's
+        # checksum validation; patch ``_inverse_vat`` so a structurally valid
+        # but checksum-invalid VAT is accepted as-is.
         service = MagicMock()
         service.get_customer.return_value = {
             'name': 'VAT Co',
@@ -126,7 +150,8 @@ class TestStripeAccount(TransactionCase):
                 ],
             },
         }
-        partner = self.stripe_account._resolve_partner('cus_VAT001', service)
+        with self._disable_vat_check():
+            partner = self.stripe_account._resolve_partner('cus_VAT001', service)
         self.assertEqual(partner.vat, 'DE123456789')
         self.assertTrue(partner.is_company)
 
@@ -140,7 +165,8 @@ class TestStripeAccount(TransactionCase):
                 {'id': 'txi_2', 'type': 'eu_vat', 'value': 'ATU12345678'},
             ],
         }
-        partner = self.stripe_account._resolve_partner('cus_BARE', service)
+        with self._disable_vat_check():
+            partner = self.stripe_account._resolve_partner('cus_BARE', service)
         self.assertEqual(partner.vat, 'ATU12345678')
 
     def test_resolve_partner_drops_invalid_vat_and_retries(self):
@@ -301,6 +327,41 @@ class TestStripeAccount(TransactionCase):
             },
         }
         self.assertAlmostEqual(self.stripe_account._get_line_price_unit(line), 10.0)
+
+    def test_prepare_move_line_vals_includes_deferred_period_when_available(self):
+        period_start = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp())
+        period_end = int(datetime(2024, 1, 31, tzinfo=timezone.utc).timestamp())
+        line = {
+            'amount': 1000,
+            'description': 'Recurring service',
+            'quantity': 1,
+            'period': {
+                'start': period_start,
+                'end': period_end,
+            },
+        }
+
+        with patch.object(type(self.stripe_account), '_has_deferred_date_fields', return_value=True):
+            line_vals = self.stripe_account._prepare_move_line_vals(line)
+
+        self.assertEqual(line_vals['deferred_start_date'], datetime(2024, 1, 1).date())
+        self.assertEqual(line_vals['deferred_end_date'], datetime(2024, 1, 31).date())
+
+    def test_prepare_move_line_vals_ignores_partial_deferred_period(self):
+        line = {
+            'amount': 1000,
+            'description': 'Recurring service',
+            'quantity': 1,
+            'period': {
+                'start': int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()),
+            },
+        }
+
+        with patch.object(type(self.stripe_account), '_has_deferred_date_fields', return_value=True):
+            line_vals = self.stripe_account._prepare_move_line_vals(line)
+
+        self.assertNotIn('deferred_start_date', line_vals)
+        self.assertNotIn('deferred_end_date', line_vals)
 
     def test_process_invoice_auto_confirm(self):
         self.stripe_account.auto_confirm = True
