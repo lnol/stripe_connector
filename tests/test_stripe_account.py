@@ -375,6 +375,40 @@ class TestStripeAccount(TransactionCase):
         self.assertNotIn('deferred_start_date', line_vals)
         self.assertNotIn('deferred_end_date', line_vals)
 
+    def test_prepare_move_line_vals_ignores_invalid_deferred_period_range(self):
+        line = {
+            'amount': 1000,
+            'description': 'Recurring service',
+            'quantity': 1,
+            'period': {
+                'start': int(datetime(2024, 1, 31, tzinfo=timezone.utc).timestamp()),
+                'end': int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()),
+            },
+        }
+
+        with patch.object(type(self.stripe_account), '_has_deferred_date_fields', return_value=True):
+            line_vals = self.stripe_account._prepare_move_line_vals(line)
+
+        self.assertNotIn('deferred_start_date', line_vals)
+        self.assertNotIn('deferred_end_date', line_vals)
+
+    def test_prepare_move_line_vals_ignores_invalid_deferred_period_timestamps(self):
+        line = {
+            'amount': 1000,
+            'description': 'Recurring service',
+            'quantity': 1,
+            'period': {
+                'start': 'invalid',
+                'end': int(datetime(2024, 1, 31, tzinfo=timezone.utc).timestamp()),
+            },
+        }
+
+        with patch.object(type(self.stripe_account), '_has_deferred_date_fields', return_value=True):
+            line_vals = self.stripe_account._prepare_move_line_vals(line)
+
+        self.assertNotIn('deferred_start_date', line_vals)
+        self.assertNotIn('deferred_end_date', line_vals)
+
     def test_process_invoice_auto_confirm(self):
         self.stripe_account.auto_confirm = True
         service = MagicMock()
