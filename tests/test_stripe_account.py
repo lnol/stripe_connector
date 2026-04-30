@@ -622,6 +622,89 @@ class TestStripeAccount(TransactionCase):
         ])
         self.assertEqual(attachment_count, 0)
 
+    def test_prefetch_data_does_not_download_pdf(self):
+        service = MagicMock()
+        service.get_customer.return_value = {'name': 'PDF Later', 'email': '', 'phone': ''}
+        service.get_invoice_lines.return_value = []
+
+        prefetched = self.stripe_account._prefetch_stripe_data(
+            {
+                'id': 'in_PREFETCH_NO_PDF',
+                'customer': 'cus_PREFETCH_NO_PDF',
+                'invoice_pdf': 'https://stripe.example.com/invoice.pdf',
+            },
+            service,
+            'invoice',
+        )
+
+        self.assertIn('stripe_lines', prefetched)
+        self.assertNotIn('pdf_bytes', prefetched)
+        service.get_pdf.assert_not_called()
+
+    def test_process_batch_item_commits_before_pdf_attachment(self):
+        service = MagicMock()
+        service.get_customer.return_value = {'name': 'Committed First', 'email': '', 'phone': ''}
+        service.get_invoice_lines.return_value = [{
+            'amount': 1000,
+            'description': 'Committed line',
+            'quantity': 1,
+            'pricing': {'price_details': {'product': 'prod_COMMIT_FIRST'}},
+        }]
+        run = self.env['stripe.import.run'].create({
+            'stripe_account_id': self.stripe_account.id,
+            'state': 'running',
+            'message': 'Running',
+        })
+        events = []
+
+        def fake_commit(_account, processed=0, remaining=None):
+            events.append(('commit', processed, remaining))
+            return True
+
+        def fake_attach(
+            _account,
+            move,
+            _stripe_obj,
+            service=None,
+            pdf_field='invoice_pdf',
+            pdf_bytes=None,
+        ):
+            events.append(('attach', bool(move.id), pdf_field, bool(service), pdf_bytes))
+
+        with patch.object(
+            type(self.stripe_account),
+            '_commit_import_progress',
+            autospec=True,
+            side_effect=fake_commit,
+        ), patch.object(
+            type(self.stripe_account),
+            '_attach_pdf',
+            autospec=True,
+            side_effect=fake_attach,
+        ):
+            state, failure, keep_going = self.stripe_account._process_batch_item(
+                run,
+                {
+                    'id': 'in_COMMIT_BEFORE_PDF',
+                    'customer': 'cus_COMMIT_BEFORE_PDF',
+                    'status': 'paid',
+                    'created': 1700000000,
+                    'currency': 'eur',
+                    'invoice_pdf': 'https://stripe.example.com/invoice.pdf',
+                },
+                service,
+                'out_invoice',
+                'invoice',
+                remaining_after=7,
+            )
+
+        self.assertEqual(state, 'done')
+        self.assertFalse(failure)
+        self.assertTrue(keep_going)
+        self.assertEqual([event[0] for event in events], ['commit', 'attach', 'commit'])
+        self.assertEqual(events[0], ('commit', 1, 7))
+        self.assertEqual(events[2], ('commit', 0, 7))
+
     # ── _fetch_invoices ─────────────────────────────────────────────────
 
     def test_fetch_invoices_updates_last_fetch_at(self):
