@@ -473,10 +473,56 @@ class StripeAccount(models.Model):
             return False
         return datetime.fromtimestamp(due_ts, tz=timezone.utc).date()
 
+    def _get_credit_note_line_invoice_line_id(self, credit_note_line):
+        return credit_note_line.get('invoice_line_item') or credit_note_line.get('invoice_line')
+
+    def _add_invoice_line_periods_to_credit_note_lines(self, stripe_obj, credit_note_lines, service):
+        invoice_id = stripe_obj.get('invoice')
+        if not invoice_id:
+            return credit_note_lines
+
+        invoice_line_ids = set()
+        for line in credit_note_lines:
+            if line.get('period'):
+                continue
+            invoice_line_id = self._get_credit_note_line_invoice_line_id(line)
+            if invoice_line_id:
+                invoice_line_ids.add(invoice_line_id)
+        if not invoice_line_ids:
+            return credit_note_lines
+
+        try:
+            invoice_lines = service.get_invoice_lines(invoice_id)
+        except Exception as exc:
+            _logger.warning(
+                'Could not fetch Stripe invoice lines for credit note %s deferred periods: %s',
+                stripe_obj.get('id'), exc,
+            )
+            return credit_note_lines
+
+        invoice_lines_by_id = {
+            invoice_line.get('id'): invoice_line
+            for invoice_line in invoice_lines
+            if invoice_line.get('id') in invoice_line_ids
+        }
+        enriched_lines = []
+        for line in credit_note_lines:
+            period = line.get('period')
+            invoice_line_id = self._get_credit_note_line_invoice_line_id(line)
+            if not period and invoice_line_id:
+                period = (invoice_lines_by_id.get(invoice_line_id) or {}).get('period')
+                if period:
+                    line = dict(line, period=period)
+            enriched_lines.append(line)
+        return enriched_lines
+
     def _get_stripe_lines(self, stripe_obj, service, stripe_object_type):
         stripe_id = stripe_obj['id']
         if stripe_object_type == 'credit_note':
-            return service.get_credit_note_lines(stripe_id)
+            credit_note_lines = service.get_credit_note_lines(stripe_id)
+            return self._add_invoice_line_periods_to_credit_note_lines(
+                stripe_obj, credit_note_lines, service
+            )
         return service.get_invoice_lines(stripe_id)
 
     def _prepare_move_vals(self, stripe_obj, service, move_type, stripe_object_type, prefetched=None):

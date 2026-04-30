@@ -409,6 +409,59 @@ class TestStripeAccount(TransactionCase):
         self.assertNotIn('deferred_start_date', line_vals)
         self.assertNotIn('deferred_end_date', line_vals)
 
+    def test_get_stripe_lines_adds_deferred_period_to_credit_note_lines(self):
+        period = {
+            'start': int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()),
+            'end': int(datetime(2024, 1, 31, tzinfo=timezone.utc).timestamp()),
+        }
+        service = MagicMock()
+        service.get_credit_note_lines.return_value = [{
+            'id': 'cnli_PERIOD',
+            'amount': 1000,
+            'description': 'Refunded subscription',
+            'quantity': 1,
+            'invoice_line_item': 'il_PERIOD',
+        }]
+        service.get_invoice_lines.return_value = [{
+            'id': 'il_PERIOD',
+            'period': period,
+        }]
+
+        lines = self.stripe_account._get_stripe_lines(
+            {'id': 'cn_PERIOD', 'invoice': 'in_PERIOD'},
+            service,
+            'credit_note',
+        )
+
+        self.assertEqual(lines[0]['period'], period)
+        service.get_credit_note_lines.assert_called_once_with('cn_PERIOD')
+        service.get_invoice_lines.assert_called_once_with('in_PERIOD')
+
+    def test_get_stripe_lines_keeps_credit_note_period_when_present(self):
+        period = {
+            'start': int(datetime(2024, 2, 1, tzinfo=timezone.utc).timestamp()),
+            'end': int(datetime(2024, 2, 29, tzinfo=timezone.utc).timestamp()),
+        }
+        service = MagicMock()
+        service.get_credit_note_lines.return_value = [{
+            'id': 'cnli_DIRECT_PERIOD',
+            'amount': 1000,
+            'description': 'Refunded subscription',
+            'quantity': 1,
+            'invoice_line_item': 'il_DIRECT_PERIOD',
+            'period': period,
+        }]
+
+        lines = self.stripe_account._get_stripe_lines(
+            {'id': 'cn_DIRECT_PERIOD', 'invoice': 'in_DIRECT_PERIOD'},
+            service,
+            'credit_note',
+        )
+
+        self.assertEqual(lines[0]['period'], period)
+        service.get_credit_note_lines.assert_called_once_with('cn_DIRECT_PERIOD')
+        service.get_invoice_lines.assert_not_called()
+
     def test_process_invoice_auto_confirm(self):
         self.stripe_account.auto_confirm = True
         service = MagicMock()
