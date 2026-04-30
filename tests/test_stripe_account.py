@@ -195,6 +195,18 @@ class TestStripeAccount(TransactionCase):
         self.assertTrue(product.sale_ok)
         self.assertFalse(product.purchase_ok)
 
+    def test_resolve_product_strips_invoice_line_quantity_and_price(self):
+        product = self.stripe_account._resolve_product(
+            'prod_CLEAN001',
+            '1 \u00d7 Consulting services for Digital Marketing via Google Ads '
+            '(at \u20ac750.00 / month)',
+        )
+
+        self.assertEqual(
+            product.name,
+            'Consulting services for Digital Marketing via Google Ads',
+        )
+
     def test_resolve_product_returns_existing(self):
         existing = self.env['product.template'].create({
             'name': 'Existing Widget',

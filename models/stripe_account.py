@@ -1,5 +1,6 @@
 import base64
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from odoo import _, api, fields, models
@@ -9,6 +10,16 @@ from odoo.tools import html_escape
 from ..services.stripe_api import StripeApiService
 
 _logger = logging.getLogger(__name__)
+_STRIPE_DESCRIPTION_QUANTITY_RE = re.compile(
+    r'^\s*\d+(?:[.,]\d+)?\s*(?:x|\u00d7)\s+'
+)
+_STRIPE_DESCRIPTION_PRICE_RE = re.compile(
+    r'\s+\(at\s+'
+    r'(?=[^)]*\d)'
+    r'(?=[^)]*(?:/|\d[.,]\d|[$]|[A-Z]{3}\b))'
+    r'[^)]*\)\s*$',
+    re.IGNORECASE,
+)
 
 
 class StripeAccount(models.Model):
@@ -315,6 +326,7 @@ class StripeAccount(models.Model):
             [('stripe_product_id', '=', stripe_product_id)], limit=1
         )
         if not product_tmpl:
+            product_name = self._clean_stripe_product_name(product_name)
             product_tmpl = self.env['product.template'].create({
                 'name': product_name or stripe_product_id,
                 'stripe_product_id': stripe_product_id,
@@ -323,6 +335,12 @@ class StripeAccount(models.Model):
                 'purchase_ok': False,
             })
         return product_tmpl
+
+    def _clean_stripe_product_name(self, product_name):
+        clean_name = (product_name or '').strip()
+        clean_name = _STRIPE_DESCRIPTION_QUANTITY_RE.sub('', clean_name)
+        clean_name = _STRIPE_DESCRIPTION_PRICE_RE.sub('', clean_name)
+        return clean_name.strip()
 
     def _get_line_product_id(self, line):
         pricing = line.get('pricing') or {}
