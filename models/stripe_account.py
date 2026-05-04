@@ -50,6 +50,13 @@ class StripeAccount(models.Model):
     _description = 'Stripe Account Configuration'
     _order = 'name'
     _check_company_auto = True
+    _sql_constraints = [
+        (
+            'sales_journal_id_unique',
+            'UNIQUE(sales_journal_id)',
+            'Each sales journal can only be linked to one Stripe account.',
+        ),
+    ]
 
     name = fields.Char(
         string='Name',
