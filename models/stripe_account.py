@@ -483,6 +483,17 @@ class StripeAccount(models.Model):
             [('stripe_invoice_id', '=', stripe_id)], limit=1
         )
 
+    def _get_existing_moves_by_stripe_id(self, stripe_ids):
+        stripe_ids = [stripe_id for stripe_id in dict.fromkeys(stripe_ids) if stripe_id]
+        if not stripe_ids:
+            return {}
+        moves = self.env['account.move'].search([('stripe_invoice_id', 'in', stripe_ids)])
+        return {
+            move.stripe_invoice_id: move
+            for move in moves
+            if move.stripe_invoice_id
+        }
+
     def _resolve_currency(self, currency_code):
         if not currency_code:
             return self.env['res.currency']
@@ -587,14 +598,23 @@ class StripeAccount(models.Model):
             # which produces frequent false positives during bulk historical imports.
             move.with_context(disable_abnormal_invoice_detection=True).action_post()
 
-    def _process_stripe_object(self, stripe_obj, service, move_type, stripe_object_type, prefetched=None):
+    def _process_stripe_object(
+        self,
+        stripe_obj,
+        service,
+        move_type,
+        stripe_object_type,
+        prefetched=None,
+        skip_existing_lookup=False,
+    ):
         stripe_id = stripe_obj.get('id')
         if not stripe_id:
             raise ValueError('Stripe object has no ID.')
 
-        existing = self._get_existing_move(stripe_id)
-        if existing:
-            return existing, 'skipped', _('Already imported.')
+        if not skip_existing_lookup:
+            existing = self._get_existing_move(stripe_id)
+            if existing:
+                return existing, 'skipped', _('Already imported.')
 
         move_vals = self._prepare_move_vals(stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched)
         move = self.env['account.move'].create(move_vals)
@@ -664,9 +684,33 @@ class StripeAccount(models.Model):
         ]
 
     def _process_batch_item(
-        self, run, stripe_obj, service, move_type, stripe_object_type, remaining_after=None
+        self,
+        run,
+        stripe_obj,
+        service,
+        move_type,
+        stripe_object_type,
+        remaining_after=None,
+        existing_moves_by_stripe_id=None,
     ):
         stripe_id = stripe_obj.get('id')
+        existing_move = (
+            existing_moves_by_stripe_id.get(stripe_id)
+            if existing_moves_by_stripe_id is not None and stripe_id
+            else False
+        )
+        if existing_move:
+            self._record_import_line(
+                run,
+                stripe_obj,
+                stripe_object_type,
+                'skipped',
+                _('Already imported.'),
+                move=existing_move,
+            )
+            keep_going = self._commit_import_progress(processed=1, remaining=remaining_after)
+            return 'skipped', False, keep_going
+
         # Pre-fetch all Stripe API data before entering the DB savepoint.
         # HTTP calls inside a savepoint can trigger gevent greenlet switches
         # that close the cursor, breaking both the rollback and any follow-up
@@ -685,7 +729,12 @@ class StripeAccount(models.Model):
         try:
             with self.env.cr.savepoint():
                 move, state, message = self._process_stripe_object(
-                    stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched
+                    stripe_obj,
+                    service,
+                    move_type,
+                    stripe_object_type,
+                    prefetched=prefetched,
+                    skip_existing_lookup=existing_moves_by_stripe_id is not None,
                 )
             self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
             keep_going = self._commit_import_progress(
@@ -921,6 +970,11 @@ class StripeAccount(models.Model):
             failures.append(message)
             batches = []
 
+        existing_moves_by_stripe_id = self._get_existing_moves_by_stripe_id(
+            stripe_obj.get('id')
+            for _stripe_object_type, _move_type, stripe_objects in batches
+            for stripe_obj in stripe_objects
+        )
         remaining = sum(len(stripe_objects) for _, _, stripe_objects in batches)
         stopped_early = False
         if remaining and not self._commit_import_progress(remaining=remaining):
@@ -940,6 +994,7 @@ class StripeAccount(models.Model):
                     move_type,
                     stripe_object_type,
                     remaining_after=remaining_after,
+                    existing_moves_by_stripe_id=existing_moves_by_stripe_id,
                 )
                 remaining = remaining_after
                 counts[state] += 1
