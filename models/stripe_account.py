@@ -913,10 +913,12 @@ class StripeAccount(models.Model):
             batches = []
 
         remaining = sum(len(stripe_objects) for _, _, stripe_objects in batches)
+        stopped_early = False
         if remaining and not self._commit_import_progress(remaining=remaining):
             failures.append(_CRON_TIME_BUDGET_MESSAGE)
             batches = []
             remaining = 0
+            stopped_early = True
         stop_requested = False
         for stripe_object_type, move_type, stripe_objects in batches:
             counts[stripe_object_type] += len(stripe_objects)
@@ -941,6 +943,7 @@ class StripeAccount(models.Model):
                 if not keep_going:
                     failures.append(_CRON_TIME_BUDGET_MESSAGE)
                     stop_requested = True
+                    stopped_early = True
                     break
             if stop_requested:
                 break
@@ -954,5 +957,12 @@ class StripeAccount(models.Model):
                 self.display_name,
                 state,
             )
+        if stopped_early:
+            # Re-queue this account so the worker picks it up again for the
+            # remaining Stripe objects.  A new fetch_requested_at timestamp
+            # is written (newer than the worker's started_at), which tells
+            # _clear_fetch_queue to leave the request in place.
+            source = self.fetch_request_source or 'scheduled'
+            self._queue_fetch(source=source)
         self._commit_import_progress(remaining=0)
         return run

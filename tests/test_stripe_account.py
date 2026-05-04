@@ -972,10 +972,9 @@ class TestStripeAccount(TransactionCase):
 
         def fake_fetch(account):
             processed.append(account.id)
-            account.write({
-                'fetch_requested_at': requested_at,
-                'fetch_request_source': 'scheduled',
-            })
+            # Simulate _fetch_invoices() stopping early: it re-queues the account
+            # with a fresh timestamp so _clear_fetch_queue leaves the request in place.
+            account._queue_fetch(source='scheduled')
 
         with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
             type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
@@ -983,7 +982,9 @@ class TestStripeAccount(TransactionCase):
             self.env['stripe.account']._cron_process_fetch_queue()
 
         self.assertEqual(processed, [self.stripe_account.id])
-        self.assertEqual(self.stripe_account.fetch_requested_at, requested_at)
+        # A new fetch_requested_at was written during the early stop, so the
+        # account should remain queued (timestamp newer than the original request).
+        self.assertGreater(self.stripe_account.fetch_requested_at, requested_at)
         self.assertFalse(self.stripe_account.fetch_started_at)
         self.assertEqual(other_account.fetch_requested_at, other_requested_at)
         self.assertFalse(other_account.fetch_started_at)
