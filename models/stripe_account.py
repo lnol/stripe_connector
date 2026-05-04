@@ -786,13 +786,12 @@ class StripeAccount(models.Model):
         if source not in ('manual', 'scheduled'):
             source = 'manual'
         accounts = self.sudo().filtered('active')
-        accounts_to_queue = accounts.filtered(lambda account: not account.fetch_requested_at)
-        if accounts_to_queue:
-            accounts_to_queue.write({
+        if accounts:
+            accounts.write({
                 'fetch_requested_at': fields.Datetime.now(),
                 'fetch_request_source': source,
             })
-        return accounts_to_queue
+        return accounts
 
     def _clear_fetch_queue(self, started_at=False):
         self.ensure_one()
