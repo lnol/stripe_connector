@@ -3,7 +3,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from psycopg2 import InterfaceError, OperationalError
+from psycopg2 import IntegrityError, InterfaceError, OperationalError
 
 from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
@@ -15,6 +15,7 @@ _logger = logging.getLogger(__name__)
 _CRON_TIME_BUDGET_MESSAGE = (
     'Cron time budget exhausted; remaining Stripe objects will be retried on the next run.'
 )
+_DUPLICATE_STRIPE_MOVE_MESSAGE = 'This Stripe object has already been imported.'
 _STRIPE_DESCRIPTION_QUANTITY_RE = re.compile(
     r'^\s*\d+(?:[.,]\d+)?\s*(?:x|\u00d7)\s+'
 )
@@ -30,6 +31,17 @@ _STRIPE_DESCRIPTION_PRICE_RE = re.compile(
 def _is_closed_db_connection_error(error):
     return isinstance(error, InterfaceError) or (
         isinstance(error, OperationalError) and 'closed' in str(error).lower()
+    )
+
+
+def _is_duplicate_stripe_move_error(error):
+    if isinstance(error, IntegrityError):
+        diag = getattr(error, 'diag', None)
+        constraint_name = getattr(diag, 'constraint_name', '') if diag else ''
+        return 'stripe_invoice_id' in constraint_name or 'stripe_invoice_id' in str(error)
+    return (
+        isinstance(error, ValidationError)
+        and _DUPLICATE_STRIPE_MOVE_MESSAGE in str(error)
     )
 
 
@@ -737,6 +749,8 @@ class StripeAccount(models.Model):
                     skip_existing_lookup=existing_moves_by_stripe_id is not None,
                 )
             self._record_import_line(run, stripe_obj, stripe_object_type, state, message, move=move)
+            if existing_moves_by_stripe_id is not None and stripe_id and move:
+                existing_moves_by_stripe_id[stripe_id] = move
             keep_going = self._commit_import_progress(
                 processed=1,
                 remaining=remaining_after,
@@ -754,6 +768,24 @@ class StripeAccount(models.Model):
         except Exception as error:
             if _is_closed_db_connection_error(error):
                 raise
+            if _is_duplicate_stripe_move_error(error) and stripe_id:
+                existing_move = self._get_existing_move(stripe_id)
+                if existing_move:
+                    if existing_moves_by_stripe_id is not None:
+                        existing_moves_by_stripe_id[stripe_id] = existing_move
+                    self._record_import_line(
+                        run,
+                        stripe_obj,
+                        stripe_object_type,
+                        'skipped',
+                        _('Already imported.'),
+                        move=existing_move,
+                    )
+                    keep_going = self._commit_import_progress(
+                        processed=1,
+                        remaining=remaining_after,
+                    )
+                    return 'skipped', False, keep_going
             message = '%s: %s' % (error.__class__.__name__, error)
             _logger.exception('Error processing Stripe %s %s', stripe_object_type, stripe_id)
             try:
@@ -970,11 +1002,6 @@ class StripeAccount(models.Model):
             failures.append(message)
             batches = []
 
-        existing_moves_by_stripe_id = self._get_existing_moves_by_stripe_id(
-            stripe_obj.get('id')
-            for _stripe_object_type, _move_type, stripe_objects in batches
-            for stripe_obj in stripe_objects
-        )
         remaining = sum(len(stripe_objects) for _, _, stripe_objects in batches)
         stopped_early = False
         if remaining and not self._commit_import_progress(remaining=remaining):
@@ -982,6 +1009,15 @@ class StripeAccount(models.Model):
             batches = []
             remaining = 0
             stopped_early = True
+        existing_moves_by_stripe_id = (
+            self._get_existing_moves_by_stripe_id(
+                stripe_obj.get('id')
+                for _stripe_object_type, _move_type, stripe_objects in batches
+                for stripe_obj in stripe_objects
+            )
+            if batches
+            else {}
+        )
         stop_requested = False
         for stripe_object_type, move_type, stripe_objects in batches:
             counts[stripe_object_type] += len(stripe_objects)
