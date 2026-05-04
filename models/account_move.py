@@ -6,6 +6,7 @@ class AccountMove(models.Model):
     _inherit = ['account.move', 'stripe.linked.mixin']
 
     _stripe_id_field = 'stripe_invoice_id'
+    _stripe_account_field = 'stripe_account_id'
 
     _stripe_invoice_id_unique = models.Constraint(
         'UNIQUE(stripe_invoice_id)',
@@ -17,6 +18,14 @@ class AccountMove(models.Model):
         index=True,
         copy=False,
         help='Stripe invoice or credit note identifier imported into this move.',
+    )
+    stripe_account_id = fields.Many2one(
+        comodel_name='stripe.account',
+        string='Stripe Account',
+        index=True,
+        copy=False,
+        ondelete='restrict',
+        help='Stripe account configuration that imported this move.',
     )
     stripe_object_type = fields.Selection(
         selection=[

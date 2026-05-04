@@ -26,12 +26,14 @@ class TestAccessRights(TransactionCase):
         cls.stripe_account = cls.env['stripe.account'].create({
             'name': 'Main Company Stripe',
             'api_key': 'sk_test_main',
+            'stripe_account_identifier': 'acct_TESTMAIN',
             'company_id': cls.company.id,
             'sales_journal_id': cls.sales_journal.id,
         })
         cls.other_stripe_account = cls.env['stripe.account'].create({
             'name': 'Other Company Stripe',
             'api_key': 'sk_test_other',
+            'stripe_account_identifier': 'acct_TESTOTHER',
             'company_id': cls.other_company.id,
             'sales_journal_id': cls.other_sales_journal.id,
         })
@@ -64,6 +66,7 @@ class TestAccessRights(TransactionCase):
             self.env['stripe.account'].with_user(self.stripe_user).create({
                 'name': 'Forbidden Stripe',
                 'api_key': 'sk_test_forbidden',
+                'stripe_account_identifier': 'acct_FORBIDDEN',
                 'company_id': self.company.id,
                 'sales_journal_id': self.sales_journal.id,
             })
@@ -109,6 +112,20 @@ class TestAccessRights(TransactionCase):
         with self.assertRaises(AccessError):
             move.with_user(self.stripe_editor_user).write({
                 'stripe_invoice_id': 'in_CHANGED',
+            })
+
+    def test_stripe_user_cannot_edit_invoice_stripe_account_link(self):
+        move = self.env['account.move'].sudo().create({
+            'move_type': 'out_invoice',
+            'journal_id': self.sales_journal.id,
+            'stripe_invoice_id': 'in_ACCOUNT_ORIGINAL',
+            'stripe_account_id': self.stripe_account.id,
+        })
+        move = self.env['account.move'].browse(move.id)
+
+        with self.assertRaises(AccessError):
+            move.with_user(self.stripe_editor_user).write({
+                'stripe_account_id': self.other_stripe_account.id,
             })
 
     def test_stripe_user_cannot_create_records_with_stripe_ids(self):

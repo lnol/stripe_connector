@@ -92,6 +92,9 @@ class StripeApiService:
         # customer payload; expand it so we can populate the partner's VAT.
         return self._get('customers/%s' % customer_id, {'expand[]': ['tax_ids']})
 
+    def get_account(self):
+        return self._get('account')
+
     def get_invoice_lines(self, invoice_id):
         return self._paginate('invoices/%s/lines' % invoice_id, {})
 
