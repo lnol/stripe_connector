@@ -11,7 +11,7 @@ def _upsert_cron_xmlid(env, xmlid, create_vals, update_vals=None):
     """Create or update a cron job identified by its XML ID.
 
     When the record already exists, only ``update_vals`` is written so that
-    administrator customisations to scheduling fields (active, user_id,
+    administrator customizations to scheduling fields (active, user_id,
     interval_number, interval_type) are preserved.  If ``update_vals`` is
     omitted the full ``create_vals`` dict is used for both paths.
     """
@@ -39,7 +39,7 @@ def migrate(cr, version):
 
     # Update the existing daily-scheduler cron.  Only the name and code are
     # changed here; active/user_id/interval settings are left untouched so
-    # that administrator customisations (e.g. a disabled cron or a custom
+    # that administrator customizations (e.g. a disabled cron or a custom
     # schedule) survive the upgrade.
     _upsert_cron_xmlid(
         env,
