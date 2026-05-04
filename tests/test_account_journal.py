@@ -1,5 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from odoo.exceptions import UserError
 from odoo.tests.common import TransactionCase
 from odoo.tests import tagged
 
@@ -154,3 +155,81 @@ class TestAccountJournal(TransactionCase):
             'https://dashboard.stripe.com/acct_TESTJOURNAL/credit_notes/cn_TEST123',
         )
         self.assertEqual(action['target'], 'new')
+
+    def test_fetch_stripe_invoice_pdf_action_downloads_and_attaches_pdf(self):
+        move = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'journal_id': self.sales_journal.id,
+            'stripe_invoice_id': 'in_FETCHPDF123',
+            'stripe_account_id': self.stripe_account.id,
+            'stripe_object_type': 'invoice',
+        })
+        service = MagicMock()
+        service.get_invoice.return_value = {
+            'id': 'in_FETCHPDF123',
+            'invoice_pdf': 'https://stripe.example.com/invoice.pdf',
+        }
+        service.get_pdf.return_value = b'%PDF-fetch-invoice'
+
+        with patch.object(type(self.stripe_account), '_get_stripe_service', return_value=service):
+            action = move.action_fetch_stripe_invoice_pdf()
+
+        attachment = self.env['ir.attachment'].search([
+            ('res_model', '=', 'account.move'),
+            ('res_id', '=', move.id),
+            ('name', '=', 'stripe_invoice_in_FETCHPDF123.pdf'),
+        ])
+        self.assertEqual(len(attachment), 1)
+        self.assertEqual(action, {'type': 'ir.actions.client', 'tag': 'reload'})
+        service.get_invoice.assert_called_once_with('in_FETCHPDF123')
+        service.get_pdf.assert_called_once_with('https://stripe.example.com/invoice.pdf')
+
+    def test_fetch_stripe_invoice_pdf_action_uses_credit_note_endpoint(self):
+        move = self.env['account.move'].create({
+            'move_type': 'out_refund',
+            'journal_id': self.sales_journal.id,
+            'stripe_invoice_id': 'cn_FETCHPDF123',
+            'stripe_account_id': self.stripe_account.id,
+            'stripe_object_type': 'credit_note',
+        })
+        service = MagicMock()
+        service.get_credit_note.return_value = {
+            'id': 'cn_FETCHPDF123',
+            'pdf': 'https://stripe.example.com/credit-note.pdf',
+        }
+        service.get_pdf.return_value = b'%PDF-fetch-credit-note'
+
+        with patch.object(type(self.stripe_account), '_get_stripe_service', return_value=service):
+            move.action_fetch_stripe_invoice_pdf()
+
+        attachment = self.env['ir.attachment'].search([
+            ('res_model', '=', 'account.move'),
+            ('res_id', '=', move.id),
+            ('name', '=', 'stripe_pdf_cn_FETCHPDF123.pdf'),
+        ])
+        self.assertEqual(len(attachment), 1)
+        service.get_credit_note.assert_called_once_with('cn_FETCHPDF123')
+        service.get_pdf.assert_called_once_with('https://stripe.example.com/credit-note.pdf')
+
+    def test_fetch_stripe_invoice_pdf_action_requires_pdf_url(self):
+        move = self.env['account.move'].new({
+            'stripe_invoice_id': 'in_NOPDF123',
+            'stripe_account_id': self.stripe_account,
+            'stripe_object_type': 'invoice',
+        })
+        service = MagicMock()
+        service.get_invoice.return_value = {
+            'id': 'in_NOPDF123',
+            'invoice_pdf': False,
+        }
+
+        with patch.object(type(self.stripe_account), '_get_stripe_service', return_value=service):
+            with self.assertRaises(UserError):
+                move.action_fetch_stripe_invoice_pdf()
+
+    def test_fetch_stripe_invoice_pdf_server_action_is_bound_to_form_view(self):
+        action = self.env.ref('stripe_connector.action_fetch_stripe_invoice_pdf')
+
+        self.assertEqual(action.name, 'Fetch Invoice PDF')
+        self.assertEqual(action.binding_model_id.model, 'account.move')
+        self.assertEqual(action.binding_view_types, 'form')
