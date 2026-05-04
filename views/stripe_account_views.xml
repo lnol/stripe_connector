@@ -11,6 +11,7 @@
                     <group>
                         <group>
                             <field name="name"/>
+                            <field name="stripe_account_identifier"/>
                             <field name="api_key" password="True" groups="stripe_connector.group_stripe_admin"/>
                             <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
                             <field name="active" invisible="1"/>
@@ -73,6 +74,7 @@
         <field name="arch" type="xml">
             <list string="Stripe Accounts">
                 <field name="name"/>
+                <field name="stripe_account_identifier"/>
                 <field name="company_id" groups="base.group_multi_company"/>
                 <field name="sales_journal_id"/>
                 <field name="auto_confirm"/>

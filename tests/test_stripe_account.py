@@ -30,6 +30,7 @@ class TestStripeAccount(TransactionCase):
         cls.stripe_account = cls.env['stripe.account'].create({
             'name': 'Test Stripe',
             'api_key': 'sk_test_dummy',
+            'stripe_account_identifier': 'acct_TESTSTRIPE',
             'company_id': cls.company.id,
             'sales_journal_id': cls.sales_journal.id,
             'default_revenue_account_id': cls.revenue_account.id,
@@ -65,6 +66,7 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(partner.name, 'Acme Corp')
         self.assertEqual(partner.email, 'acme@example.com')
         self.assertEqual(partner.customer_rank, 1)
+        self.assertEqual(partner.stripe_account_id, self.stripe_account)
         service.get_customer.assert_called_once_with('cus_NEW123')
 
     def test_resolve_partner_returns_existing(self):
@@ -75,6 +77,7 @@ class TestStripeAccount(TransactionCase):
         service = MagicMock()
         partner = self.stripe_account._resolve_partner('cus_EXIST456', service)
         self.assertEqual(partner.id, existing.id)
+        self.assertEqual(partner.stripe_account_id, self.stripe_account)
         service.get_customer.assert_not_called()
 
     def test_resolve_partner_uses_email_as_name_fallback(self):
@@ -216,6 +219,7 @@ class TestStripeAccount(TransactionCase):
     def test_resolve_product_creates_new(self):
         product = self.stripe_account._resolve_product('prod_NEW001', 'Widget Pro')
         self.assertEqual(product.stripe_product_id, 'prod_NEW001')
+        self.assertEqual(product.stripe_account_id, self.stripe_account)
         self.assertEqual(product.name, 'Widget Pro')
         self.assertEqual(product.type, 'service')
         self.assertTrue(product.sale_ok)
@@ -241,6 +245,17 @@ class TestStripeAccount(TransactionCase):
         })
         product = self.stripe_account._resolve_product('prod_EXIST002', 'Ignored Name')
         self.assertEqual(product.id, existing.id)
+        self.assertEqual(product.stripe_account_id, self.stripe_account)
+
+    def test_stripe_account_identifier_rejects_invalid_value(self):
+        with self.assertRaises(ValidationError):
+            self.env['stripe.account'].create({
+                'name': 'Invalid Stripe ID',
+                'api_key': 'sk_test_invalid',
+                'stripe_account_identifier': 'invalid_account_id',
+                'company_id': self.company.id,
+                'sales_journal_id': self.sales_journal.id,
+            })
 
     # ── _get_line_product_id ────────────────────────────────────────────
 
@@ -275,6 +290,7 @@ class TestStripeAccount(TransactionCase):
         service = MagicMock()
         stripe_invoice = {'id': 'in_ALREADY_IMPORTED', 'customer': 'cus_X'}
         self.stripe_account._process_stripe_invoice(stripe_invoice, service)
+        self.assertEqual(existing_move.stripe_account_id, self.stripe_account)
         service.get_customer.assert_not_called()
 
     def test_process_invoice_skips_no_customer(self):
@@ -317,6 +333,7 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(len(move), 1)
         self.assertEqual(move.move_type, 'out_invoice')
         self.assertEqual(move.journal_id, self.sales_journal)
+        self.assertEqual(move.stripe_account_id, self.stripe_account)
         self.assertEqual(move.state, 'draft')
 
         # Verify line was created with correct price (50.00 EUR/USD from 5000 cents)
@@ -574,6 +591,7 @@ class TestStripeAccount(TransactionCase):
         self.stripe_account._process_stripe_invoice(stripe_cn, service, move_type='out_refund')
         move = self.env['account.move'].search([('stripe_invoice_id', '=', 'cn_TESTCN001')])
         self.assertEqual(move.move_type, 'out_refund')
+        self.assertEqual(move.stripe_account_id, self.stripe_account)
         self.assertEqual(move.stripe_object_type, 'credit_note')
         service.get_credit_note_lines.assert_called_once_with('cn_TESTCN001')
         service.get_invoice_lines.assert_not_called()
@@ -811,6 +829,7 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(len(line), 1)
         self.assertEqual(line.state, 'skipped')
         self.assertEqual(line.move_id, existing_move)
+        self.assertEqual(existing_move.stripe_account_id, self.stripe_account)
         service.get_customer.assert_not_called()
         service.get_invoice_lines.assert_not_called()
 
@@ -1049,12 +1068,14 @@ class TestStripeAccount(TransactionCase):
         active_account = self.env['stripe.account'].create({
             'name': 'Cron Active',
             'api_key': 'sk_test_active',
+            'stripe_account_identifier': 'acct_CRONACTIVE',
             'company_id': other_company.id,
             'sales_journal_id': other_journal.id,
         })
         inactive_account = self.env['stripe.account'].create({
             'name': 'Cron Inactive',
             'api_key': 'sk_test_inactive',
+            'stripe_account_identifier': 'acct_CRONINACTIVE',
             'company_id': other_company.id,
             'sales_journal_id': other_journal.id,
             'active': False,
@@ -1075,6 +1096,7 @@ class TestStripeAccount(TransactionCase):
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Second',
             'api_key': 'sk_test_second',
+            'stripe_account_identifier': 'acct_CRONSECOND',
             'company_id': self.company.id,
             'sales_journal_id': self.sales_journal.id,
         })
@@ -1108,6 +1130,7 @@ class TestStripeAccount(TransactionCase):
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Early Stop Second',
             'api_key': 'sk_test_early_stop_second',
+            'stripe_account_identifier': 'acct_CRONEARLYSTOP',
             'company_id': self.company.id,
             'sales_journal_id': self.sales_journal.id,
         })
@@ -1151,6 +1174,7 @@ class TestStripeAccount(TransactionCase):
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Second Run',
             'api_key': 'sk_test_second_run',
+            'stripe_account_identifier': 'acct_CRONSECONDRUN',
             'company_id': self.company.id,
             'sales_journal_id': self.sales_journal.id,
         })
@@ -1182,6 +1206,7 @@ class TestStripeAccount(TransactionCase):
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Survives Failure',
             'api_key': 'sk_test_survives',
+            'stripe_account_identifier': 'acct_CRONSURVIVES',
             'company_id': self.company.id,
             'sales_journal_id': self.sales_journal.id,
         })

@@ -50,6 +50,13 @@ class StripeAccount(models.Model):
     _description = 'Stripe Account Configuration'
     _order = 'name'
     _check_company_auto = True
+    _sql_constraints = [
+        (
+            'sales_journal_id_unique',
+            'UNIQUE(sales_journal_id)',
+            'Each sales journal can only be linked to one Stripe account.',
+        ),
+    ]
 
     name = fields.Char(
         string='Name',
@@ -61,6 +68,13 @@ class StripeAccount(models.Model):
         required=True,
         groups='stripe_connector.group_stripe_admin',
         help='Stripe secret API key used to fetch invoices, credit notes, and PDFs.',
+    )
+    stripe_account_identifier = fields.Char(
+        string='Stripe Account ID',
+        required=True,
+        index=True,
+        copy=False,
+        help='Stripe account identifier used in Dashboard URLs, for example acct_1P4I63KFrsB6EyRC.',
     )
     company_id = fields.Many2one(
         comodel_name='res.company',
@@ -158,9 +172,30 @@ class StripeAccount(models.Model):
         help='History of Stripe import runs for this account.',
     )
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get('stripe_account_identifier'):
+                vals['stripe_account_identifier'] = vals['stripe_account_identifier'].strip()
+        return super().create(vals_list)
+
+    def write(self, vals):
+        if vals.get('stripe_account_identifier'):
+            vals = dict(vals, stripe_account_identifier=vals['stripe_account_identifier'].strip())
+        return super().write(vals)
+
     def _get_stripe_service(self):
         self.ensure_one()
         return StripeApiService(self.api_key)
+
+    @api.constrains('stripe_account_identifier')
+    def _check_stripe_account_identifier(self):
+        for account in self:
+            account_identifier = (account.stripe_account_identifier or '').strip()
+            if account_identifier and not re.fullmatch(r'acct_[A-Za-z0-9]+', account_identifier):
+                raise ValidationError(
+                    _('Stripe Account ID must start with acct_ and contain only letters and numbers.')
+                )
 
     def _create_import_run(self):
         """Create the import run on the current cursor."""
@@ -246,6 +281,8 @@ class StripeAccount(models.Model):
             [('stripe_customer_id', '=', stripe_customer_id)], limit=1
         )
         if partner:
+            if not partner.stripe_account_id:
+                partner.stripe_account_id = self.id
             return partner
         if customer_data is None and service is not None:
             customer_data = service.get_customer(stripe_customer_id)
@@ -294,6 +331,7 @@ class StripeAccount(models.Model):
             'email': email,
             'phone': customer_data.get('phone') or '',
             'stripe_customer_id': stripe_customer_id,
+            'stripe_account_id': self.id,
             'customer_rank': 1,
         }
 
@@ -374,10 +412,13 @@ class StripeAccount(models.Model):
             product_tmpl = self.env['product.template'].create({
                 'name': product_name or stripe_product_id,
                 'stripe_product_id': stripe_product_id,
+                'stripe_account_id': self.id,
                 'type': 'service',
                 'sale_ok': True,
                 'purchase_ok': False,
             })
+        elif not product_tmpl.stripe_account_id:
+            product_tmpl.stripe_account_id = self.id
         return product_tmpl
 
     def _clean_stripe_product_name(self, product_name):
@@ -596,6 +637,7 @@ class StripeAccount(models.Model):
             'invoice_date': self._get_invoice_date(stripe_obj),
             'invoice_date_due': self._get_invoice_date_due(stripe_obj),
             'stripe_invoice_id': stripe_obj['id'],
+            'stripe_account_id': self.id,
             'stripe_object_type': stripe_object_type,
             'invoice_line_ids': self._build_move_lines(stripe_lines),
         }
@@ -626,6 +668,8 @@ class StripeAccount(models.Model):
         if not skip_existing_lookup:
             existing = self._get_existing_move(stripe_id)
             if existing:
+                if not existing.stripe_account_id:
+                    existing.stripe_account_id = self.id
                 return existing, 'skipped', _('Already imported.')
 
         move_vals = self._prepare_move_vals(stripe_obj, service, move_type, stripe_object_type, prefetched=prefetched)
@@ -712,6 +756,8 @@ class StripeAccount(models.Model):
             else False
         )
         if existing_move:
+            if not existing_move.stripe_account_id:
+                existing_move.stripe_account_id = self.id
             self._record_import_line(
                 run,
                 stripe_obj,
@@ -771,6 +817,8 @@ class StripeAccount(models.Model):
             if _is_duplicate_stripe_move_error(error) and stripe_id:
                 existing_move = self._get_existing_move(stripe_id)
                 if existing_move:
+                    if not existing_move.stripe_account_id:
+                        existing_move.stripe_account_id = self.id
                     if existing_moves_by_stripe_id is not None:
                         existing_moves_by_stripe_id[stripe_id] = existing_move
                     self._record_import_line(

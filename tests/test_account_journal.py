@@ -24,6 +24,7 @@ class TestAccountJournal(TransactionCase):
         cls.stripe_account = cls.env['stripe.account'].create({
             'name': 'Test Stripe Journal',
             'api_key': 'sk_test_dummy',
+            'stripe_account_identifier': 'acct_TESTJOURNAL',
             'company_id': cls.company.id,
             'sales_journal_id': cls.sales_journal.id,
         })
@@ -57,6 +58,7 @@ class TestAccountJournal(TransactionCase):
         other_account = self.env['stripe.account'].create({
             'name': 'Other Stripe Journal',
             'api_key': 'sk_test_other',
+            'stripe_account_identifier': 'acct_OTHERJOURNAL',
             'company_id': other_company.id,
             'sales_journal_id': other_journal.id,
         })
@@ -78,16 +80,21 @@ class TestAccountJournal(TransactionCase):
 
     def test_field_extensions_exist(self):
         partner = self.env['res.partner'].new({'name': 'Test'})
+        self.assertIn('stripe_account_identifier', self.env['stripe.account']._fields)
         self.assertIn('stripe_customer_id', self.env['res.partner']._fields)
+        self.assertIn('stripe_account_id', self.env['res.partner']._fields)
 
         self.assertIn('stripe_invoice_id', self.env['account.move']._fields)
+        self.assertIn('stripe_account_id', self.env['account.move']._fields)
         self.assertFalse(self.env['account.move']._fields['stripe_invoice_id'].readonly)
         self.assertIn('stripe_product_id', self.env['product.template']._fields)
+        self.assertIn('stripe_account_id', self.env['product.template']._fields)
 
     def test_open_stripe_product_action(self):
         product = self.env['product.template'].create({
             'name': 'Stripe Product',
             'stripe_product_id': 'prod_TEST123',
+            'stripe_account_id': self.stripe_account.id,
             'type': 'service',
         })
 
@@ -96,7 +103,7 @@ class TestAccountJournal(TransactionCase):
         self.assertEqual(action['type'], 'ir.actions.act_url')
         self.assertEqual(
             action['url'],
-            'https://dashboard.stripe.com/products/prod_TEST123',
+            'https://dashboard.stripe.com/acct_TESTJOURNAL/products/prod_TEST123',
         )
         self.assertEqual(action['target'], 'new')
 
@@ -104,6 +111,7 @@ class TestAccountJournal(TransactionCase):
         partner = self.env['res.partner'].new({
             'name': 'Stripe Customer',
             'stripe_customer_id': 'cus_TEST123',
+            'stripe_account_id': self.stripe_account,
         })
 
         action = partner.action_open_stripe_customer()
@@ -111,13 +119,14 @@ class TestAccountJournal(TransactionCase):
         self.assertEqual(action['type'], 'ir.actions.act_url')
         self.assertEqual(
             action['url'],
-            'https://dashboard.stripe.com/customers/cus_TEST123',
+            'https://dashboard.stripe.com/acct_TESTJOURNAL/customers/cus_TEST123',
         )
         self.assertEqual(action['target'], 'new')
 
     def test_open_stripe_invoice_action(self):
         move = self.env['account.move'].new({
             'stripe_invoice_id': 'in_TEST123',
+            'stripe_account_id': self.stripe_account,
             'stripe_object_type': 'invoice',
         })
 
@@ -126,13 +135,14 @@ class TestAccountJournal(TransactionCase):
         self.assertEqual(action['type'], 'ir.actions.act_url')
         self.assertEqual(
             action['url'],
-            'https://dashboard.stripe.com/invoices/in_TEST123',
+            'https://dashboard.stripe.com/acct_TESTJOURNAL/invoices/in_TEST123',
         )
         self.assertEqual(action['target'], 'new')
 
     def test_open_stripe_credit_note_action(self):
         move = self.env['account.move'].new({
             'stripe_invoice_id': 'cn_TEST123',
+            'stripe_account_id': self.stripe_account,
             'stripe_object_type': 'credit_note',
         })
 
@@ -141,6 +151,6 @@ class TestAccountJournal(TransactionCase):
         self.assertEqual(action['type'], 'ir.actions.act_url')
         self.assertEqual(
             action['url'],
-            'https://dashboard.stripe.com/credit_notes/cn_TEST123',
+            'https://dashboard.stripe.com/acct_TESTJOURNAL/credit_notes/cn_TEST123',
         )
         self.assertEqual(action['target'], 'new')

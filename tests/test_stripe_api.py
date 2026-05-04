@@ -41,6 +41,15 @@ class TestStripeApiService(TransactionCase):
 
         mock_paginate.assert_called_once_with('credit_notes/cn_TEST/lines', {})
 
+    def test_get_account_uses_account_endpoint(self):
+        service = StripeApiService('sk_test_dummy')
+
+        with patch.object(service, '_get', return_value={'id': 'acct_TEST'}) as mock_get:
+            result = service.get_account()
+
+        self.assertEqual(result['id'], 'acct_TEST')
+        mock_get.assert_called_once_with('account')
+
     def test_get_invoices_filters_by_finalized_after(self):
         service = StripeApiService('sk_test_dummy')
         cutoff_ts = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())
