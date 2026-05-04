@@ -20,6 +20,9 @@
                             <field name="invoice_cutoff_date"/>
                             <field name="fetch_lookback_days"/>
                             <field name="last_fetch_at" readonly="1"/>
+                            <field name="fetch_requested_at" readonly="1"/>
+                            <field name="fetch_started_at" readonly="1"/>
+                            <field name="fetch_request_source" readonly="1"/>
                         </group>
                     </group>
                     <notebook>
@@ -75,6 +78,8 @@
                 <field name="auto_confirm"/>
                 <field name="invoice_cutoff_date"/>
                 <field name="last_fetch_at"/>
+                <field name="fetch_requested_at"/>
+                <field name="fetch_started_at"/>
                 <field name="active" column_invisible="True"/>
             </list>
         </field>

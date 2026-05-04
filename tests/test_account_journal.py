@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from odoo.tests.common import TransactionCase
 from odoo.tests import tagged
 
@@ -43,6 +45,29 @@ class TestAccountJournal(TransactionCase):
         self.stripe_account.active = False
         self.assertFalse(self.sales_journal.show_stripe_fetch_button)
         self.stripe_account.active = True
+
+    def test_fetch_button_queues_only_clicked_journal_account(self):
+        other_company = self.env['res.company'].create({'name': 'Stripe Other Company'})
+        other_journal = self.env['account.journal'].create({
+            'name': 'Stripe Other Sales',
+            'code': 'STOS',
+            'type': 'sale',
+            'company_id': other_company.id,
+        })
+        other_account = self.env['stripe.account'].create({
+            'name': 'Other Stripe Journal',
+            'api_key': 'sk_test_other',
+            'company_id': other_company.id,
+            'sales_journal_id': other_journal.id,
+        })
+
+        with patch.object(type(self.stripe_account), '_trigger_fetch_worker') as trigger:
+            self.sales_journal.action_stripe_fetch_invoices()
+
+        self.assertTrue(self.stripe_account.fetch_requested_at)
+        self.assertEqual(self.stripe_account.fetch_request_source, 'manual')
+        self.assertFalse(other_account.fetch_requested_at)
+        trigger.assert_called_once()
 
     def test_stripe_account_id_none_for_unlinked_journal(self):
         other_journal = self.env['account.journal'].search([

@@ -108,6 +108,28 @@ class StripeAccount(models.Model):
             'Already-imported invoices are skipped via deduplication.'
         ),
     )
+    fetch_requested_at = fields.Datetime(
+        string='Fetch Requested At',
+        readonly=True,
+        copy=False,
+        help='Timestamp of the pending Stripe fetch request for this account.',
+    )
+    fetch_started_at = fields.Datetime(
+        string='Fetch Started At',
+        readonly=True,
+        copy=False,
+        help='Timestamp of the currently running queued Stripe fetch.',
+    )
+    fetch_request_source = fields.Selection(
+        selection=[
+            ('manual', 'Manual'),
+            ('scheduled', 'Scheduled'),
+        ],
+        string='Fetch Request Source',
+        readonly=True,
+        copy=False,
+        help='Origin of the pending Stripe fetch request.',
+    )
     default_revenue_account_id = fields.Many2one(
         comodel_name='account.account',
         string='Default Revenue Account',
@@ -730,39 +752,147 @@ class StripeAccount(models.Model):
         run.message_post(body='<br/>'.join(html_escape(line) for line in summary.splitlines()))
         return state
 
-    def _trigger_fetch(self):
-        """Trigger the shared Stripe fetch cron to run in the background.
+    @api.model
+    def _fetch_queue_domain(self):
+        return [
+            ('active', '=', True),
+            ('fetch_requested_at', '!=', False),
+            ('fetch_started_at', '=', False),
+        ]
 
-        Uses a pre-defined single cron record instead of creating a new one per
-        click, following the same pattern as account_online_synchronization.
-        The trigger fires within the cron worker's next poll cycle (~60 s).
-        """
-        self.ensure_one()
-        cron = self.env.ref('stripe_connector.cron_stripe_fetch_invoices', raise_if_not_found=False)
+    @api.model
+    def _fetch_queue_stale_cutoff(self):
+        limit_time = config['limit_time_real_cron'] or -1
+        if limit_time <= 0:
+            limit_time = config['limit_time_real'] or 120
+        return fields.Datetime.now() - timedelta(seconds=limit_time + 20)
+
+    @api.model
+    def _trigger_fetch_worker(self):
+        cron = self.env.ref(
+            'stripe_connector.cron_stripe_process_fetch_queue',
+            raise_if_not_found=False,
+        )
         if not cron:
-            _logger.error('Stripe fetch cron not found (stripe_connector.cron_stripe_fetch_invoices)')
+            _logger.error(
+                'Stripe fetch queue cron not found '
+                '(stripe_connector.cron_stripe_process_fetch_queue)'
+            )
             return
-        _logger.info('Stripe fetch: triggering cron id=%d active=%s', cron.id, cron.active)
+        _logger.info('Stripe fetch queue: triggering cron id=%d active=%s', cron.id, cron.active)
         cron.sudo()._trigger(fields.Datetime.now() + timedelta(seconds=1))
+
+    def _queue_fetch(self, source='manual'):
+        if source not in ('manual', 'scheduled'):
+            source = 'manual'
+        accounts = self.sudo().filtered('active')
+        requested_at = fields.Datetime.now()
+        for account in accounts:
+            account_requested_at = requested_at
+            if account.fetch_requested_at and account_requested_at <= account.fetch_requested_at:
+                account_requested_at = account.fetch_requested_at + timedelta(seconds=1)
+            account.write({
+                'fetch_requested_at': account_requested_at,
+                'fetch_request_source': source,
+            })
+        return accounts
+
+    def _clear_fetch_queue(self, claimed_requested_at=False):
+        self.ensure_one()
+        vals = {'fetch_started_at': False}
+        if (
+            not self.fetch_requested_at
+            or not claimed_requested_at
+            or self.fetch_requested_at == claimed_requested_at
+        ):
+            vals.update({
+                'fetch_requested_at': False,
+                'fetch_request_source': False,
+            })
+        self.write(vals)
+
+    @api.model
+    def _requeue_stale_fetches(self):
+        cutoff = self._fetch_queue_stale_cutoff()
+        stale_accounts = self.sudo().search([
+            ('active', '=', True),
+            ('fetch_requested_at', '!=', False),
+            ('fetch_started_at', '!=', False),
+            ('fetch_started_at', '<=', cutoff),
+        ])
+        if stale_accounts:
+            _logger.warning(
+                'Stripe fetch queue: requeueing %d stale account(s): %s',
+                len(stale_accounts),
+                ', '.join(stale_accounts.mapped('display_name')),
+            )
+            stale_accounts.write({'fetch_started_at': False})
+        return stale_accounts
+
+    def _trigger_fetch(self):
+        """Queue this account and trigger the Stripe fetch worker cron."""
+        self.ensure_one()
+        self._queue_fetch(source='manual')
+        self._trigger_fetch_worker()
+
+    @api.model
+    def _cron_queue_all_fetches(self):
+        """Queue a fetch for every active Stripe account. Called by the daily cron.
+
+        Uses ``sudo()`` so the import-side creates (partner, product, move) do
+        not depend on the cron user being a Stripe admin - the access checks
+        on those models bail on ``env.su`` before consulting groups.
+        """
+        accounts = self.sudo().search([('active', '=', True)])
+        queued = accounts._queue_fetch(source='scheduled')
+        self.env['ir.cron']._commit_progress(processed=len(accounts), remaining=0)
+        _logger.info(
+            'Stripe cron: queued %d of %d active account(s)',
+            len(queued),
+            len(accounts),
+        )
+        if accounts:
+            self._trigger_fetch_worker()
+
+    @api.model
+    def _cron_process_fetch_queue(self):
+        """Process one queued Stripe account and reschedule if more are pending."""
+        Account = self.sudo()
+        Account._requeue_stale_fetches()
+        account = Account.search(Account._fetch_queue_domain(), order='fetch_requested_at, id', limit=1)
+        if not account:
+            self.env['ir.cron']._commit_progress(remaining=0)
+            return
+
+        claimed_requested_at = account.fetch_requested_at
+        started_at = fields.Datetime.now()
+        account.write({'fetch_started_at': started_at})
+        self.env['ir.cron']._commit_progress(remaining=1)
+        try:
+            account.with_context(stripe_commit_progress=True)._fetch_invoices()
+        except Exception:
+            _logger.exception(
+                'Unhandled error during queued Stripe invoice fetch for account %s',
+                account.display_name,
+            )
+        finally:
+            account.invalidate_recordset(['fetch_requested_at', 'fetch_started_at'])
+            account._clear_fetch_queue(claimed_requested_at=claimed_requested_at)
+
+        remaining = Account.search_count(Account._fetch_queue_domain())
+        self.env['ir.cron']._commit_progress(processed=1, remaining=0)
+        if remaining:
+            self._trigger_fetch_worker()
 
     @api.model
     def _cron_fetch_all(self):
-        """Fetch invoices for every active Stripe account. Called by the cron.
+        """Compatibility wrapper for databases still pointing at the old cron code.
 
         Uses ``sudo()`` so the import-side creates (partner, product, move) do
         not depend on the cron user being a Stripe admin — the access checks
         on those models bail on ``env.su`` before consulting groups.
         """
-        accounts = self.sudo().search([('active', '=', True)])
-        _logger.info('Stripe cron: fetching for %d active account(s)', len(accounts))
-        for account in accounts:
-            account_name = account.name
-            try:
-                account.with_context(stripe_commit_progress=True)._fetch_invoices()
-            except Exception:
-                _logger.exception(
-                    'Unhandled error during Stripe invoice fetch for account %s', account_name
-                )
+        return self._cron_queue_all_fetches()
 
     def _fetch_invoices(self):
         self.ensure_one()
@@ -792,10 +922,12 @@ class StripeAccount(models.Model):
             batches = []
 
         remaining = sum(len(stripe_objects) for _, _, stripe_objects in batches)
+        stopped_early = False
         if remaining and not self._commit_import_progress(remaining=remaining):
             failures.append(_CRON_TIME_BUDGET_MESSAGE)
             batches = []
             remaining = 0
+            stopped_early = True
         stop_requested = False
         for stripe_object_type, move_type, stripe_objects in batches:
             counts[stripe_object_type] += len(stripe_objects)
@@ -820,6 +952,7 @@ class StripeAccount(models.Model):
                 if not keep_going:
                     failures.append(_CRON_TIME_BUDGET_MESSAGE)
                     stop_requested = True
+                    stopped_early = True
                     break
             if stop_requested:
                 break
@@ -833,5 +966,11 @@ class StripeAccount(models.Model):
                 self.display_name,
                 state,
             )
+        if stopped_early:
+            # Re-queue this account so the worker picks it up again for the
+            # remaining Stripe objects.  A distinct fetch_requested_at value
+            # tells _clear_fetch_queue to leave the request in place.
+            source = self.fetch_request_source or 'scheduled'
+            self._queue_fetch(source=source)
         self._commit_import_progress(remaining=0)
         return run
