@@ -778,6 +778,160 @@ class TestStripeAccount(TransactionCase):
             datetime(2024, 1, 31, 23, 59, 59),
         )
 
+    def test_fetch_invoices_bulk_skips_existing_without_prefetch(self):
+        existing_move = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'journal_id': self.sales_journal.id,
+            'stripe_invoice_id': 'in_BULK_ALREADY_IMPORTED',
+        })
+        service = MagicMock()
+        service.get_invoices.return_value = [{
+            'id': 'in_BULK_ALREADY_IMPORTED',
+            'customer': 'cus_SHOULD_NOT_FETCH',
+            'created': int(datetime(2024, 1, 2).timestamp()),
+        }]
+        service.get_credit_notes.return_value = []
+        service.get_customer.side_effect = AssertionError('duplicate customer fetched')
+        service.get_invoice_lines.side_effect = AssertionError('duplicate lines fetched')
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ), patch.object(
+            type(self.stripe_account),
+            '_get_existing_move',
+            side_effect=AssertionError('per-object duplicate lookup used'),
+        ):
+            run = self.stripe_account._fetch_invoices()
+
+        self.assertEqual(run.state, 'done')
+        self.assertEqual(run.skipped_count, 1)
+        line = run.line_ids.filtered(
+            lambda run_line: run_line.stripe_object_id == 'in_BULK_ALREADY_IMPORTED'
+        )
+        self.assertEqual(len(line), 1)
+        self.assertEqual(line.state, 'skipped')
+        self.assertEqual(line.move_id, existing_move)
+        service.get_customer.assert_not_called()
+        service.get_invoice_lines.assert_not_called()
+
+    def test_fetch_invoices_skips_bulk_existing_lookup_when_out_of_time(self):
+        service = MagicMock()
+        service.get_invoices.return_value = [{
+            'id': 'in_OUT_OF_TIME',
+            'customer': 'cus_OUT_OF_TIME',
+            'created': int(datetime(2024, 1, 2).timestamp()),
+        }]
+        service.get_credit_notes.return_value = []
+
+        def fake_commit(_account, processed=0, remaining=None):
+            return remaining != 1
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ), patch.object(
+            type(self.stripe_account),
+            '_commit_import_progress',
+            autospec=True,
+            side_effect=fake_commit,
+        ), patch.object(
+            type(self.stripe_account),
+            '_get_existing_moves_by_stripe_id',
+            autospec=True,
+            side_effect=AssertionError('bulk duplicate lookup used after timeout'),
+        ):
+            run = self.stripe_account._fetch_invoices()
+
+        self.assertEqual(run.state, 'failed')
+        service.get_customer.assert_not_called()
+        service.get_invoice_lines.assert_not_called()
+
+    def test_fetch_invoices_updates_bulk_map_for_created_moves(self):
+        stripe_invoice = {
+            'id': 'in_DUPLICATE_IN_SAME_BATCH',
+            'customer': 'cus_DUPLICATE_IN_SAME_BATCH',
+            'status': 'paid',
+            'created': int(datetime(2024, 1, 2).timestamp()),
+            'currency': 'eur',
+        }
+        service = MagicMock()
+        service.get_invoices.return_value = [stripe_invoice, dict(stripe_invoice)]
+        service.get_credit_notes.return_value = []
+        service.get_customer.return_value = {
+            'name': 'Same Batch Duplicate',
+            'email': '',
+            'phone': '',
+        }
+        service.get_invoice_lines.return_value = [{
+            'amount': 1000,
+            'description': 'Same batch line',
+            'quantity': 1,
+            'pricing': {'price_details': {'product': 'prod_SAME_BATCH'}},
+        }]
+
+        with patch.object(
+            type(self.stripe_account), '_get_stripe_service', return_value=service
+        ):
+            run = self.stripe_account._fetch_invoices()
+
+        moves = self.env['account.move'].search([
+            ('stripe_invoice_id', '=', 'in_DUPLICATE_IN_SAME_BATCH'),
+        ])
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(run.state, 'done')
+        self.assertEqual(run.skipped_count, 1)
+        self.assertEqual(len(run.line_ids.filtered(lambda line: line.state == 'done')), 1)
+        self.assertEqual(len(run.line_ids.filtered(lambda line: line.state == 'skipped')), 1)
+        service.get_customer.assert_called_once_with('cus_DUPLICATE_IN_SAME_BATCH')
+        service.get_invoice_lines.assert_called_once_with('in_DUPLICATE_IN_SAME_BATCH')
+
+    def test_process_batch_item_converts_duplicate_constraint_race_to_skip(self):
+        existing_move = self.env['account.move'].create({
+            'move_type': 'out_invoice',
+            'journal_id': self.sales_journal.id,
+            'stripe_invoice_id': 'in_DUPLICATE_RACE',
+        })
+        run = self.env['stripe.import.run'].create({
+            'stripe_account_id': self.stripe_account.id,
+            'state': 'running',
+            'message': 'Running',
+        })
+        existing_moves_by_stripe_id = {}
+        stripe_invoice = {
+            'id': 'in_DUPLICATE_RACE',
+            'customer': 'cus_DUPLICATE_RACE',
+            'created': int(datetime(2024, 1, 2).timestamp()),
+        }
+
+        with patch.object(
+            type(self.stripe_account),
+            '_prefetch_stripe_data',
+            autospec=True,
+            return_value={'stripe_lines': []},
+        ), patch.object(
+            type(self.stripe_account),
+            '_process_stripe_object',
+            autospec=True,
+            side_effect=ValidationError('This Stripe object has already been imported.'),
+        ):
+            state, failure, keep_going = self.stripe_account._process_batch_item(
+                run,
+                stripe_invoice,
+                MagicMock(),
+                'out_invoice',
+                'invoice',
+                remaining_after=0,
+                existing_moves_by_stripe_id=existing_moves_by_stripe_id,
+            )
+
+        self.assertEqual(state, 'skipped')
+        self.assertFalse(failure)
+        self.assertTrue(keep_going)
+        self.assertEqual(existing_moves_by_stripe_id['in_DUPLICATE_RACE'], existing_move)
+        line = run.line_ids.filtered(lambda run_line: run_line.stripe_object_id == 'in_DUPLICATE_RACE')
+        self.assertEqual(len(line), 1)
+        self.assertEqual(line.state, 'skipped')
+        self.assertEqual(line.move_id, existing_move)
+
     def test_fetch_floor_applies_lookback(self):
         self.stripe_account.last_fetch_at = fields.Datetime.to_datetime('2024-04-01 00:00:00')
         self.stripe_account.fetch_lookback_days = 30
