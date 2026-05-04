@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from odoo import SUPERUSER_ID, fields
@@ -973,18 +973,21 @@ class TestStripeAccount(TransactionCase):
         def fake_fetch(account):
             processed.append(account.id)
             # Simulate _fetch_invoices() stopping early: it re-queues the account
-            # with a fresh timestamp so _clear_fetch_queue leaves the request in place.
+            # in the same second as the worker claim.
             account._queue_fetch(source='scheduled')
 
-        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+        with patch.object(fields.Datetime, 'now', return_value=requested_at), patch.object(
+            type(self.env['ir.cron']), '_commit_progress'
+        ), patch.object(
             type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
         ), patch.object(type(self.stripe_account), '_trigger_fetch_worker') as trigger:
             self.env['stripe.account']._cron_process_fetch_queue()
 
         self.assertEqual(processed, [self.stripe_account.id])
-        # A new fetch_requested_at was written during the early stop, so the
-        # account should remain queued (timestamp newer than the original request).
-        self.assertGreater(self.stripe_account.fetch_requested_at, requested_at)
+        self.assertEqual(
+            self.stripe_account.fetch_requested_at,
+            requested_at + timedelta(seconds=1),
+        )
         self.assertFalse(self.stripe_account.fetch_started_at)
         self.assertEqual(other_account.fetch_requested_at, other_requested_at)
         self.assertFalse(other_account.fetch_started_at)

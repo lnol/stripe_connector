@@ -786,17 +786,25 @@ class StripeAccount(models.Model):
         if source not in ('manual', 'scheduled'):
             source = 'manual'
         accounts = self.sudo().filtered('active')
-        if accounts:
-            accounts.write({
-                'fetch_requested_at': fields.Datetime.now(),
+        requested_at = fields.Datetime.now()
+        for account in accounts:
+            account_requested_at = requested_at
+            if account.fetch_requested_at and account_requested_at <= account.fetch_requested_at:
+                account_requested_at = account.fetch_requested_at + timedelta(seconds=1)
+            account.write({
+                'fetch_requested_at': account_requested_at,
                 'fetch_request_source': source,
             })
         return accounts
 
-    def _clear_fetch_queue(self, started_at=False):
+    def _clear_fetch_queue(self, claimed_requested_at=False):
         self.ensure_one()
         vals = {'fetch_started_at': False}
-        if not self.fetch_requested_at or not started_at or self.fetch_requested_at <= started_at:
+        if (
+            not self.fetch_requested_at
+            or not claimed_requested_at
+            or self.fetch_requested_at == claimed_requested_at
+        ):
             vals.update({
                 'fetch_requested_at': False,
                 'fetch_request_source': False,
@@ -856,6 +864,7 @@ class StripeAccount(models.Model):
             self.env['ir.cron']._commit_progress(remaining=0)
             return
 
+        claimed_requested_at = account.fetch_requested_at
         started_at = fields.Datetime.now()
         account.write({'fetch_started_at': started_at})
         self.env['ir.cron']._commit_progress(remaining=1)
@@ -868,7 +877,7 @@ class StripeAccount(models.Model):
             )
         finally:
             account.invalidate_recordset(['fetch_requested_at', 'fetch_started_at'])
-            account._clear_fetch_queue(started_at=started_at)
+            account._clear_fetch_queue(claimed_requested_at=claimed_requested_at)
 
         remaining = Account.search_count(Account._fetch_queue_domain())
         self.env['ir.cron']._commit_progress(processed=1, remaining=0)
@@ -959,9 +968,8 @@ class StripeAccount(models.Model):
             )
         if stopped_early:
             # Re-queue this account so the worker picks it up again for the
-            # remaining Stripe objects.  A new fetch_requested_at timestamp
-            # is written (newer than the worker's started_at), which tells
-            # _clear_fetch_queue to leave the request in place.
+            # remaining Stripe objects.  A distinct fetch_requested_at value
+            # tells _clear_fetch_queue to leave the request in place.
             source = self.fetch_request_source or 'scheduled'
             self._queue_fetch(source=source)
         self._commit_import_progress(remaining=0)
