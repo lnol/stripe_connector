@@ -950,6 +950,45 @@ class TestStripeAccount(TransactionCase):
         self.assertFalse(other_account.fetch_started_at)
         trigger.assert_called_once()
 
+    def test_cron_process_fetch_queue_keeps_account_queued_when_fetch_stops_early(self):
+        other_account = self.env['stripe.account'].create({
+            'name': 'Cron Early Stop Second',
+            'api_key': 'sk_test_early_stop_second',
+            'company_id': self.company.id,
+            'sales_journal_id': self.sales_journal.id,
+        })
+        requested_at = fields.Datetime.to_datetime('2024-01-01 00:00:00')
+        other_requested_at = fields.Datetime.to_datetime('2024-01-02 00:00:00')
+        self.stripe_account.write({
+            'fetch_requested_at': requested_at,
+            'fetch_request_source': 'scheduled',
+        })
+        other_account.write({
+            'fetch_requested_at': other_requested_at,
+            'fetch_request_source': 'scheduled',
+        })
+
+        processed = []
+
+        def fake_fetch(account):
+            processed.append(account.id)
+            account.write({
+                'fetch_requested_at': requested_at,
+                'fetch_request_source': 'scheduled',
+            })
+
+        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+            type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
+        ), patch.object(type(self.stripe_account), '_trigger_fetch_worker') as trigger:
+            self.env['stripe.account']._cron_process_fetch_queue()
+
+        self.assertEqual(processed, [self.stripe_account.id])
+        self.assertEqual(self.stripe_account.fetch_requested_at, requested_at)
+        self.assertFalse(self.stripe_account.fetch_started_at)
+        self.assertEqual(other_account.fetch_requested_at, other_requested_at)
+        self.assertFalse(other_account.fetch_started_at)
+        trigger.assert_called_once()
+
     def test_cron_process_fetch_queue_second_run_processes_second_account(self):
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Second Run',
