@@ -46,9 +46,9 @@ class AccountJournal(models.Model):
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Stripe Fetch Started'),
+                'title': _('Stripe Fetch Queued'),
                 'message': _(
-                    'Invoices are being imported in the background. '
+                    'Invoices for this Stripe account are queued for import. '
                     'Check the import history on the Stripe account for results.'
                 ),
                 'type': 'info',

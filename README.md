@@ -65,16 +65,19 @@ account you want to import from:
 
 ### Scheduled
 
-`Stripe: Fetch Invoices` runs daily as `base.user_root`. It iterates every
-active `stripe.account`, processes each in isolation (one failure does not
-block the others), and writes a `stripe.import.run` record per account.
+`Stripe: Queue Invoice Fetches` runs daily as `base.user_root`. It queues every
+active `stripe.account`; `Stripe: Process Invoice Fetch Queue` then imports one
+queued account per cron invocation and reschedules itself until the queue is
+empty. Each account is processed in isolation and writes its own
+`stripe.import.run` record.
 
 ### Manual
 
 Each sales journal that has a linked active Stripe account shows a
 **Fetch Stripe Invoices** button on its dashboard kanban card. Clicking it
-triggers the shared cron to fire on its next poll cycle (≤60 s). Only members
-of *Stripe Administrator* see and can use the button.
+queues only the Stripe account linked to that journal and triggers the queue
+worker on its next poll cycle (<=60 s). Only members of *Stripe Administrator*
+see and can use the button.
 
 ### Import history
 

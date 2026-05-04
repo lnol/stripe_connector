@@ -884,35 +884,7 @@ class TestStripeAccount(TransactionCase):
 
     # ── _cron_fetch_all ─────────────────────────────────────────────────
 
-    def test_cron_fetch_all_runs_as_root_via_sudo(self):
-        service = MagicMock()
-        service.get_customer.return_value = {'name': 'Cron Cust', 'email': '', 'phone': ''}
-        service.get_invoice_lines.return_value = [{
-            'amount': 1000,
-            'description': 'Cron line',
-            'quantity': 1,
-            'pricing': {'price_details': {'product': 'prod_CRON'}},
-        }]
-        service.get_pdf.return_value = b''
-        service.get_invoices.return_value = [{
-            'id': 'in_CRON_AS_ROOT',
-            'customer': 'cus_CRONROOT',
-            'status': 'paid',
-            'created': 1700000000,
-            'currency': 'eur',
-            'invoice_pdf': None,
-        }]
-        service.get_credit_notes.return_value = []
-
-        with patch.object(
-            type(self.stripe_account), '_get_stripe_service', return_value=service
-        ):
-            self.env['stripe.account'].with_user(SUPERUSER_ID)._cron_fetch_all()
-
-        move = self.env['account.move'].search([('stripe_invoice_id', '=', 'in_CRON_AS_ROOT')])
-        self.assertEqual(len(move), 1)
-
-    def test_cron_fetch_all_isolates_account_failures(self):
+    def test_cron_queue_all_fetches_queues_active_accounts_only(self):
         other_company = self.env['res.company'].create({'name': 'Cron Other'})
         other_journal = self.env['account.journal'].create({
             'name': 'Cron Other Sales',
@@ -920,26 +892,139 @@ class TestStripeAccount(TransactionCase):
             'type': 'sale',
             'company_id': other_company.id,
         })
-        failing_account = self.env['stripe.account'].create({
-            'name': 'Cron Failing',
-            'api_key': 'sk_test_fail',
+        active_account = self.env['stripe.account'].create({
+            'name': 'Cron Active',
+            'api_key': 'sk_test_active',
             'company_id': other_company.id,
             'sales_journal_id': other_journal.id,
         })
+        inactive_account = self.env['stripe.account'].create({
+            'name': 'Cron Inactive',
+            'api_key': 'sk_test_inactive',
+            'company_id': other_company.id,
+            'sales_journal_id': other_journal.id,
+            'active': False,
+        })
 
-        good_service = MagicMock()
-        good_service.get_invoices.return_value = []
-        good_service.get_credit_notes.return_value = []
+        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+            type(self.stripe_account), '_trigger_fetch_worker'
+        ) as trigger:
+            self.env['stripe.account'].with_user(SUPERUSER_ID)._cron_queue_all_fetches()
 
-        def get_service(self_account):
-            if self_account.id == failing_account.id:
+        self.assertTrue(self.stripe_account.fetch_requested_at)
+        self.assertEqual(self.stripe_account.fetch_request_source, 'scheduled')
+        self.assertTrue(active_account.fetch_requested_at)
+        self.assertFalse(inactive_account.fetch_requested_at)
+        trigger.assert_called_once()
+
+    def test_cron_process_fetch_queue_processes_one_account_at_a_time(self):
+        other_account = self.env['stripe.account'].create({
+            'name': 'Cron Second',
+            'api_key': 'sk_test_second',
+            'company_id': self.company.id,
+            'sales_journal_id': self.sales_journal.id,
+        })
+        self.stripe_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+        other_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-02 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+
+        processed = []
+
+        def fake_fetch(account):
+            processed.append(account.id)
+
+        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+            type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
+        ), patch.object(type(self.stripe_account), '_trigger_fetch_worker') as trigger:
+            self.env['stripe.account']._cron_process_fetch_queue()
+
+        self.assertEqual(processed, [self.stripe_account.id])
+        self.assertFalse(self.stripe_account.fetch_requested_at)
+        self.assertFalse(self.stripe_account.fetch_started_at)
+        self.assertTrue(other_account.fetch_requested_at)
+        self.assertFalse(other_account.fetch_started_at)
+        trigger.assert_called_once()
+
+    def test_cron_process_fetch_queue_second_run_processes_second_account(self):
+        other_account = self.env['stripe.account'].create({
+            'name': 'Cron Second Run',
+            'api_key': 'sk_test_second_run',
+            'company_id': self.company.id,
+            'sales_journal_id': self.sales_journal.id,
+        })
+        self.stripe_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+        other_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-02 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+
+        processed = []
+
+        def fake_fetch(account):
+            processed.append(account.id)
+
+        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+            type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
+        ), patch.object(type(self.stripe_account), '_trigger_fetch_worker'):
+            self.env['stripe.account']._cron_process_fetch_queue()
+            self.env['stripe.account']._cron_process_fetch_queue()
+
+        self.assertEqual(processed, [self.stripe_account.id, other_account.id])
+        self.assertFalse(self.stripe_account.fetch_requested_at)
+        self.assertFalse(other_account.fetch_requested_at)
+
+    def test_cron_process_fetch_queue_clears_failed_account_and_keeps_others(self):
+        other_account = self.env['stripe.account'].create({
+            'name': 'Cron Survives Failure',
+            'api_key': 'sk_test_survives',
+            'company_id': self.company.id,
+            'sales_journal_id': self.sales_journal.id,
+        })
+        self.stripe_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+        other_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-02 00:00:00'),
+            'fetch_request_source': 'scheduled',
+        })
+
+        def fake_fetch(account):
+            if account.id == self.stripe_account.id:
                 raise RuntimeError('boom')
-            return good_service
+
+        with patch.object(type(self.env['ir.cron']), '_commit_progress'), patch.object(
+            type(self.stripe_account), '_fetch_invoices', autospec=True, side_effect=fake_fetch
+        ), patch.object(type(self.stripe_account), '_trigger_fetch_worker') as trigger:
+            self.env['stripe.account']._cron_process_fetch_queue()
+
+        self.assertFalse(self.stripe_account.fetch_requested_at)
+        self.assertFalse(self.stripe_account.fetch_started_at)
+        self.assertTrue(other_account.fetch_requested_at)
+        trigger.assert_called_once()
+
+    def test_requeue_stale_fetches_keeps_request_and_clears_started_at(self):
+        self.stripe_account.write({
+            'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
+            'fetch_started_at': fields.Datetime.to_datetime('2024-01-01 00:05:00'),
+            'fetch_request_source': 'scheduled',
+        })
 
         with patch.object(
-            type(self.stripe_account), '_get_stripe_service', autospec=True, side_effect=get_service
+            type(self.stripe_account),
+            '_fetch_queue_stale_cutoff',
+            return_value=fields.Datetime.to_datetime('2024-01-01 00:10:00'),
         ):
-            self.env['stripe.account']._cron_fetch_all()
+            stale = self.env['stripe.account']._requeue_stale_fetches()
 
-        # Good account still ran to completion
-        self.assertTrue(self.stripe_account.last_fetch_at)
+        self.assertEqual(stale.ids, self.stripe_account.ids)
+        self.assertTrue(self.stripe_account.fetch_requested_at)
+        self.assertFalse(self.stripe_account.fetch_started_at)
