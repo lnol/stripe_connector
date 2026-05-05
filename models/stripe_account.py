@@ -50,13 +50,10 @@ class StripeAccount(models.Model):
     _description = 'Stripe Account Configuration'
     _order = 'name'
     _check_company_auto = True
-    _sql_constraints = [
-        (
-            'sales_journal_id_unique',
-            'UNIQUE(sales_journal_id)',
-            'Each sales journal can only be linked to one Stripe account.',
-        ),
-    ]
+    _sales_journal_id_unique = models.Constraint(
+        'UNIQUE(sales_journal_id)',
+        'Each sales journal can only be linked to one Stripe account.',
+    )
 
     name = fields.Char(
         string='Name',
@@ -172,16 +169,28 @@ class StripeAccount(models.Model):
         help='History of Stripe import runs for this account.',
     )
 
+    @staticmethod
+    def _normalize_stripe_account_identifier(identifier):
+        identifier = (identifier or '').strip()
+        return identifier or False
+
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
             if vals.get('stripe_account_identifier'):
-                vals['stripe_account_identifier'] = vals['stripe_account_identifier'].strip()
+                vals['stripe_account_identifier'] = self._normalize_stripe_account_identifier(
+                    vals['stripe_account_identifier']
+                )
         return super().create(vals_list)
 
     def write(self, vals):
         if vals.get('stripe_account_identifier'):
-            vals = dict(vals, stripe_account_identifier=vals['stripe_account_identifier'].strip())
+            vals = dict(
+                vals,
+                stripe_account_identifier=self._normalize_stripe_account_identifier(
+                    vals['stripe_account_identifier']
+                ),
+            )
         return super().write(vals)
 
     def _get_stripe_service(self):
@@ -191,7 +200,9 @@ class StripeAccount(models.Model):
     @api.constrains('stripe_account_identifier')
     def _check_stripe_account_identifier(self):
         for account in self:
-            account_identifier = (account.stripe_account_identifier or '').strip()
+            account_identifier = self._normalize_stripe_account_identifier(
+                account.stripe_account_identifier
+            ) or ''
             if account_identifier and not re.fullmatch(r'acct_[A-Za-z0-9]+', account_identifier):
                 raise ValidationError(
                     _('Stripe Account ID must start with acct_ and contain only letters and numbers.')

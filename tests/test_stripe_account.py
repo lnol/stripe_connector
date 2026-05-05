@@ -15,10 +15,12 @@ class TestStripeAccount(TransactionCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.company = cls.env.company
-        cls.sales_journal = cls.env['account.journal'].search([
-            ('type', '=', 'sale'),
-            ('company_id', '=', cls.company.id),
-        ], limit=1)
+        cls.sales_journal = cls.env['account.journal'].create({
+            'name': 'Test Stripe Primary Sales',
+            'code': 'TSPSL',
+            'type': 'sale',
+            'company_id': cls.company.id,
+        })
         cls.revenue_account = cls.env['account.account'].search([
             ('account_type', '=', 'income'),
             ('company_ids', 'in', [cls.company.id]),
@@ -51,6 +53,18 @@ class TestStripeAccount(TransactionCase):
             return
         with patch.object(Partner, '_inverse_vat', lambda partner_self: None):
             yield
+
+    def _create_sales_journal(self, company=None, name='Stripe Test Sales'):
+        company = company or self.company
+        journal_number = self.env['account.journal'].search_count([
+            ('company_id', '=', company.id),
+        ]) + 1
+        return self.env['account.journal'].create({
+            'name': '%s %s' % (name, journal_number),
+            'code': 'S%04d' % journal_number,
+            'type': 'sale',
+            'company_id': company.id,
+        })
 
     # ── _resolve_partner ────────────────────────────────────────────────
 
@@ -248,16 +262,41 @@ class TestStripeAccount(TransactionCase):
         self.assertEqual(product.stripe_account_id, self.stripe_account)
 
     def test_stripe_account_identifier_rejects_invalid_value(self):
+        invalid_journal = self._create_sales_journal(name='Invalid Stripe Sales')
         with self.assertRaises(ValidationError):
             self.env['stripe.account'].create({
                 'name': 'Invalid Stripe ID',
                 'api_key': 'sk_test_invalid',
                 'stripe_account_identifier': 'invalid_account_id',
                 'company_id': self.company.id,
-                'sales_journal_id': self.sales_journal.id,
+                'sales_journal_id': invalid_journal.id,
             })
 
     # ── _get_line_product_id ────────────────────────────────────────────
+
+    def test_stripe_account_identifier_is_trimmed_on_create(self):
+        extra_journal = self.env['account.journal'].create({
+            'name': 'Trimmed Create Sales',
+            'code': 'TRMC',
+            'type': 'sale',
+            'company_id': self.company.id,
+        })
+        account = self.env['stripe.account'].create({
+            'name': 'Trimmed Create Stripe',
+            'api_key': 'sk_test_trimmed_create',
+            'stripe_account_identifier': '  acct_TRIMMEDCREATE  ',
+            'company_id': self.company.id,
+            'sales_journal_id': extra_journal.id,
+        })
+
+        self.assertEqual(account.stripe_account_identifier, 'acct_TRIMMEDCREATE')
+
+    def test_stripe_account_identifier_is_trimmed_on_write(self):
+        self.stripe_account.write({
+            'stripe_account_identifier': '  acct_TRIMMEDWRITE  ',
+        })
+
+        self.assertEqual(self.stripe_account.stripe_account_identifier, 'acct_TRIMMEDWRITE')
 
     def test_get_line_product_id_new_api(self):
         line = {
@@ -1059,12 +1098,14 @@ class TestStripeAccount(TransactionCase):
 
     def test_cron_queue_all_fetches_queues_active_accounts_only(self):
         other_company = self.env['res.company'].create({'name': 'Cron Other'})
-        other_journal = self.env['account.journal'].create({
-            'name': 'Cron Other Sales',
-            'code': 'CRNOS',
-            'type': 'sale',
-            'company_id': other_company.id,
-        })
+        other_journal = self._create_sales_journal(
+            company=other_company,
+            name='Cron Other Active Sales',
+        )
+        inactive_journal = self._create_sales_journal(
+            company=other_company,
+            name='Cron Other Inactive Sales',
+        )
         active_account = self.env['stripe.account'].create({
             'name': 'Cron Active',
             'api_key': 'sk_test_active',
@@ -1077,7 +1118,7 @@ class TestStripeAccount(TransactionCase):
             'api_key': 'sk_test_inactive',
             'stripe_account_identifier': 'acct_CRONINACTIVE',
             'company_id': other_company.id,
-            'sales_journal_id': other_journal.id,
+            'sales_journal_id': inactive_journal.id,
             'active': False,
         })
 
@@ -1093,12 +1134,13 @@ class TestStripeAccount(TransactionCase):
         trigger.assert_called_once()
 
     def test_cron_process_fetch_queue_processes_one_account_at_a_time(self):
+        other_journal = self._create_sales_journal(name='Cron Second Sales')
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Second',
             'api_key': 'sk_test_second',
             'stripe_account_identifier': 'acct_CRONSECOND',
             'company_id': self.company.id,
-            'sales_journal_id': self.sales_journal.id,
+            'sales_journal_id': other_journal.id,
         })
         self.stripe_account.write({
             'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
@@ -1127,12 +1169,13 @@ class TestStripeAccount(TransactionCase):
         trigger.assert_called_once()
 
     def test_cron_process_fetch_queue_keeps_account_queued_when_fetch_stops_early(self):
+        other_journal = self._create_sales_journal(name='Cron Early Stop Sales')
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Early Stop Second',
             'api_key': 'sk_test_early_stop_second',
             'stripe_account_identifier': 'acct_CRONEARLYSTOP',
             'company_id': self.company.id,
-            'sales_journal_id': self.sales_journal.id,
+            'sales_journal_id': other_journal.id,
         })
         requested_at = fields.Datetime.to_datetime('2024-01-01 00:00:00')
         other_requested_at = fields.Datetime.to_datetime('2024-01-02 00:00:00')
@@ -1171,12 +1214,13 @@ class TestStripeAccount(TransactionCase):
         trigger.assert_called_once()
 
     def test_cron_process_fetch_queue_second_run_processes_second_account(self):
+        other_journal = self._create_sales_journal(name='Cron Second Run Sales')
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Second Run',
             'api_key': 'sk_test_second_run',
             'stripe_account_identifier': 'acct_CRONSECONDRUN',
             'company_id': self.company.id,
-            'sales_journal_id': self.sales_journal.id,
+            'sales_journal_id': other_journal.id,
         })
         self.stripe_account.write({
             'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
@@ -1203,12 +1247,13 @@ class TestStripeAccount(TransactionCase):
         self.assertFalse(other_account.fetch_requested_at)
 
     def test_cron_process_fetch_queue_clears_failed_account_and_keeps_others(self):
+        other_journal = self._create_sales_journal(name='Cron Failure Survivor Sales')
         other_account = self.env['stripe.account'].create({
             'name': 'Cron Survives Failure',
             'api_key': 'sk_test_survives',
             'stripe_account_identifier': 'acct_CRONSURVIVES',
             'company_id': self.company.id,
-            'sales_journal_id': self.sales_journal.id,
+            'sales_journal_id': other_journal.id,
         })
         self.stripe_account.write({
             'fetch_requested_at': fields.Datetime.to_datetime('2024-01-01 00:00:00'),
