@@ -230,6 +230,15 @@ class TestAccountJournal(TransactionCase):
     def test_fetch_stripe_invoice_pdf_server_action_is_bound_to_form_view(self):
         action = self.env.ref('stripe_connector.action_fetch_stripe_invoice_pdf')
 
-        self.assertEqual(action.name, 'Fetch Invoice PDF')
+        self.assertEqual(action.name, 'Fetch Stripe PDF')
         self.assertEqual(action.binding_model_id.model, 'account.move')
         self.assertEqual(action.binding_view_types, 'form')
+        self.assertEqual(action.binding_domain, '[("stripe_invoice_id", "!=", False)]')
+
+    def test_fetch_stripe_invoice_pdf_action_raises_for_unknown_object_type(self):
+        move = self.env['account.move'].new({
+            'stripe_invoice_id': 'in_UNKNOWN123',
+            'stripe_account_id': self.stripe_account,
+        })
+        with self.assertRaisesRegex(UserError, 'stripe_object_type must be either'):
+            move.action_fetch_stripe_invoice_pdf()

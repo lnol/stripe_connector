@@ -48,7 +48,11 @@ class AccountMove(models.Model):
         self.ensure_one()
         if self.stripe_object_type == 'credit_note':
             return 'credit note', 'pdf', 'get_credit_note'
-        return 'invoice', 'invoice_pdf', 'get_invoice'
+        if self.stripe_object_type == 'invoice':
+            return 'invoice', 'invoice_pdf', 'get_invoice'
+        raise UserError(
+            _('Cannot determine Stripe document type: stripe_object_type must be either "invoice" or "credit_note".')
+        )
 
     def action_fetch_stripe_invoice_pdf(self):
         self.ensure_one()
