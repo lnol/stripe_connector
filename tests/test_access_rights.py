@@ -13,10 +13,12 @@ class TestAccessRights(TransactionCase):
         cls.other_company = cls.env['res.company'].create({
             'name': 'Other Stripe Company',
         })
-        cls.sales_journal = cls.env['account.journal'].search([
-            ('type', '=', 'sale'),
-            ('company_id', '=', cls.company.id),
-        ], limit=1)
+        cls.sales_journal = cls.env['account.journal'].create({
+            'name': 'Main Stripe Sales',
+            'code': 'MSSAL',
+            'type': 'sale',
+            'company_id': cls.company.id,
+        })
         cls.other_sales_journal = cls.env['account.journal'].create({
             'name': 'Other Stripe Sales',
             'code': 'OSTRP',
