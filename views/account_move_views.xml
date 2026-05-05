@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+    <record id="action_fetch_stripe_invoice_pdf" model="ir.actions.server">
+        <field name="name">Fetch Stripe PDF</field>
+        <field name="model_id" ref="account.model_account_move"/>
+        <field name="binding_model_id" ref="account.model_account_move"/>
+        <field name="binding_view_types">form</field>
+        <field name="binding_domain">[("stripe_invoice_id", "!=", False)]</field>
+        <field name="state">code</field>
+        <field name="code">action = records.action_fetch_stripe_invoice_pdf()</field>
+    </record>
+
     <record id="view_move_form_inherit_stripe" model="ir.ui.view">
         <field name="name">account.move.form.inherit.stripe</field>
         <field name="model">account.move</field>

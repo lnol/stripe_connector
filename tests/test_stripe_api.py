@@ -50,6 +50,24 @@ class TestStripeApiService(TransactionCase):
         self.assertEqual(result['id'], 'acct_TEST')
         mock_get.assert_called_once_with('account')
 
+    def test_get_invoice_uses_invoice_endpoint(self):
+        service = StripeApiService('sk_test_dummy')
+
+        with patch.object(service, '_get', return_value={'id': 'in_TEST'}) as mock_get:
+            result = service.get_invoice('in_TEST')
+
+        self.assertEqual(result['id'], 'in_TEST')
+        mock_get.assert_called_once_with('invoices/in_TEST')
+
+    def test_get_credit_note_uses_credit_note_endpoint(self):
+        service = StripeApiService('sk_test_dummy')
+
+        with patch.object(service, '_get', return_value={'id': 'cn_TEST'}) as mock_get:
+            result = service.get_credit_note('cn_TEST')
+
+        self.assertEqual(result['id'], 'cn_TEST')
+        mock_get.assert_called_once_with('credit_notes/cn_TEST')
+
     def test_get_invoices_filters_by_finalized_after(self):
         service = StripeApiService('sk_test_dummy')
         cutoff_ts = int(datetime(2024, 1, 15, tzinfo=timezone.utc).timestamp())

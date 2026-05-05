@@ -95,6 +95,12 @@ class StripeApiService:
     def get_account(self):
         return self._get('account')
 
+    def get_invoice(self, invoice_id):
+        return self._get('invoices/%s' % invoice_id)
+
+    def get_credit_note(self, credit_note_id):
+        return self._get('credit_notes/%s' % credit_note_id)
+
     def get_invoice_lines(self, invoice_id):
         return self._paginate('invoices/%s/lines' % invoice_id, {})
 
