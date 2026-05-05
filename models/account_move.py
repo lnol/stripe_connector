@@ -58,9 +58,9 @@ class AccountMove(models.Model):
         ):
             raise AccessError(_('Only Stripe users can fetch Stripe PDFs.'))
         if not self.stripe_invoice_id:
-            raise UserError(_('This invoice is not linked to a Stripe object.'))
+            raise UserError(_('This document is not linked to a Stripe object.'))
         if not self.stripe_account_id:
-            raise UserError(_('This invoice is not linked to a Stripe account.'))
+            raise UserError(_('This document is not linked to a Stripe account.'))
 
         stripe_account = self.stripe_account_id.sudo()
         stripe_object_label, pdf_field, service_method_name = self._get_stripe_pdf_fetch_spec()
