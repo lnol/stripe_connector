@@ -1,10 +1,20 @@
+import importlib.util
 import logging
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
 
-def _legacy_placeholder_stripe_account_identifier(record_id):
-    return 'acct_LEGACY%s' % int(record_id)
+def _load_const_module():
+    const_path = Path(__file__).resolve().parents[2] / 'const.py'
+    spec = importlib.util.spec_from_file_location('stripe_connector.const', const_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_const = _load_const_module()
+LEGACY_STRIPE_ACCOUNT_IDENTIFIER_PREFIX = _const.LEGACY_STRIPE_ACCOUNT_IDENTIFIER_PREFIX
 
 
 def migrate(cr, version):
@@ -22,22 +32,19 @@ def migrate(cr, version):
 
     cr.execute(
         """
-        SELECT id, name
-          FROM stripe_account
-         WHERE stripe_account_identifier IS NULL
+        WITH updated AS (
+            UPDATE stripe_account
+               SET stripe_account_identifier = %s || id::text
+             WHERE stripe_account_identifier IS NULL
+         RETURNING id, name, stripe_account_identifier
+        )
+        SELECT id, name, stripe_account_identifier
+          FROM updated
          ORDER BY id
-        """
+        """,
+        [LEGACY_STRIPE_ACCOUNT_IDENTIFIER_PREFIX],
     )
     missing_identifiers = cr.fetchall()
-    for record_id, _name in missing_identifiers:
-        cr.execute(
-            """
-            UPDATE stripe_account
-               SET stripe_account_identifier = %s
-             WHERE id = %s
-            """,
-            [_legacy_placeholder_stripe_account_identifier(record_id), record_id],
-        )
 
     if missing_identifiers:
         _logger.warning(
@@ -48,8 +55,8 @@ def migrate(cr, version):
                 '%s (%s → %s)' % (
                     name,
                     record_id,
-                    _legacy_placeholder_stripe_account_identifier(record_id),
+                    identifier,
                 )
-                for record_id, name in missing_identifiers
+                for record_id, name, identifier in missing_identifiers
             ),
         )
