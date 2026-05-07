@@ -174,6 +174,10 @@ class StripeAccount(models.Model):
         identifier = (identifier or '').strip()
         return identifier or False
 
+    @staticmethod
+    def _legacy_placeholder_stripe_account_identifier(record_id):
+        return 'acct_LEGACY%s' % int(record_id)
+
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
