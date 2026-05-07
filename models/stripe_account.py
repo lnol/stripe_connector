@@ -9,6 +9,7 @@ from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
 from odoo.tools import config, html_escape
 
+from ..const import legacy_placeholder_stripe_account_identifier
 from ..services.stripe_api import StripeApiService
 
 _logger = logging.getLogger(__name__)
@@ -173,6 +174,10 @@ class StripeAccount(models.Model):
     def _normalize_stripe_account_identifier(identifier):
         identifier = (identifier or '').strip()
         return identifier or False
+
+    @staticmethod
+    def _legacy_placeholder_stripe_account_identifier(record_id):
+        return legacy_placeholder_stripe_account_identifier(record_id)
 
     @api.model_create_multi
     def create(self, vals_list):

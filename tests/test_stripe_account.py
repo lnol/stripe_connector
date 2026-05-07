@@ -272,7 +272,11 @@ class TestStripeAccount(TransactionCase):
                 'sales_journal_id': invalid_journal.id,
             })
 
-    # ── _get_line_product_id ────────────────────────────────────────────
+    def test_legacy_placeholder_stripe_account_identifier_matches_validation_format(self):
+        placeholder = self.stripe_account._legacy_placeholder_stripe_account_identifier(42)
+
+        self.assertEqual(placeholder, 'acct_LEGACY42')
+        self.assertRegex(placeholder, r'^acct_[A-Za-z0-9]+$')
 
     def test_stripe_account_identifier_is_trimmed_on_create(self):
         extra_journal = self.env['account.journal'].create({
@@ -297,6 +301,8 @@ class TestStripeAccount(TransactionCase):
         })
 
         self.assertEqual(self.stripe_account.stripe_account_identifier, 'acct_TRIMMEDWRITE')
+
+    # ── _get_line_product_id ────────────────────────────────────────────
 
     def test_get_line_product_id_new_api(self):
         line = {
