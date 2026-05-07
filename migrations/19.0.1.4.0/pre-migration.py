@@ -34,7 +34,7 @@ def migrate(cr, version):
         """
         WITH updated AS (
             UPDATE stripe_account
-               SET stripe_account_identifier = %s || id::text
+               SET stripe_account_identifier = %s || CAST(id AS TEXT)
              WHERE stripe_account_identifier IS NULL
          RETURNING id, name, stripe_account_identifier
         )
