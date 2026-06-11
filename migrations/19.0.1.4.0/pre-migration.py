@@ -18,10 +18,20 @@ LEGACY_STRIPE_ACCOUNT_IDENTIFIER_PREFIX = _const.LEGACY_STRIPE_ACCOUNT_IDENTIFIE
 
 
 def migrate(cr, version):
-    # Odoo applies ``required=True`` schema changes before post-migration
-    # hooks run. Legacy databases can still contain NULL / whitespace-only
-    # account identifiers, so normalize them here before the registry tries to
-    # add the NOT NULL constraint.
+    # On a fresh install Odoo runs all pre-migrations before the ORM creates
+    # any tables, so the column won't exist yet — nothing to normalize.
+    cr.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'stripe_account'
+           AND column_name = 'stripe_account_identifier'
+        """
+    )
+    if not cr.fetchone():
+        return
+
+    # Legacy databases can still contain NULL / whitespace-only account
+    # identifiers; normalize them before the ORM applies the NOT NULL constraint.
     cr.execute(
         """
         UPDATE stripe_account
