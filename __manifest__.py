@@ -1,6 +1,6 @@
 {
     'name': 'Stripe Connector',
-    'version': '19.0.1.4.0',
+    'version': '19.0.1.5.0',
     'category': 'Accounting/Accounting',
     'summary': 'Fetch Stripe invoices and credit notes into Odoo accounting',
     'author': 'Custom',

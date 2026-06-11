@@ -17,19 +17,10 @@ _const = _load_const_module()
 
 
 def migrate(cr, version):
-    # Older databases can still have the column marked nullable even though
-    # the field is required. Normalize legacy whitespace-only values first,
-    # then fill any remaining NULLs with a recognisable legacy placeholder so
-    # the NOT NULL constraint can be applied unconditionally. The 1.4.0
-    # migration warns about placeholder IDs, prompting admins to replace them.
-    cr.execute(
-        """
-        UPDATE stripe_account
-           SET stripe_account_identifier = NULLIF(BTRIM(stripe_account_identifier), '')
-         WHERE stripe_account_identifier IS DISTINCT FROM NULLIF(BTRIM(stripe_account_identifier), '')
-        """
-    )
-
+    # Fill any remaining NULLs with a recognisable legacy placeholder so the
+    # NOT NULL constraint can be applied unconditionally. The 1.4.0 migration
+    # (and every subsequent boot) warns about placeholder IDs, prompting admins
+    # to replace them with real Stripe account identifiers.
     cr.execute(
         """
         UPDATE stripe_account
